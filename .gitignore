@@ -1,0 +1,33 @@
+# Android / Gradle
+.gradle/
+build/
+**/build/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+captures/
+.cxx/
+.externalNativeBuild/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets and local agent state
+.env
+secrets.properties
+.claude/
+
+# Private planning / progress notes
+PLAN.md
+PROGRESS.md
+
+# Logs
+*.log
