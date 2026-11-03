@@ -80,7 +80,7 @@ object UiBridge {
                     result(true, "pressed: $id")
                 }
             }
-            "start" -> withContext { HostService.start(it, request.optInt("sites", 0)) }.let { result(true, "started") }
+            "start" -> withContext { HostService.start(it) }.let { result(true, "started") }
             "stop" -> withContext { HostService.stop(it) }.let { result(true, "stopped") }
             "battery_exemption" -> withContext {
                 it.startActivity(

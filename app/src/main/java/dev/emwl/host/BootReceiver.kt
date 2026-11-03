@@ -11,11 +11,7 @@ class BootReceiver : BroadcastReceiver() {
         ) {
             return
         }
-
-        val sites = HostState.desiredSites(context)
-        if (sites <= 0) return
-
-        runCatching { HostService.start(context, sites) }
+        runCatching { HostService.start(context) }
             .onFailure { HostState.lastServiceError = "autostart failed: ${it.message}" }
     }
 }

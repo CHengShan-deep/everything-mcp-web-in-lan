@@ -49,8 +49,11 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("io.ktor:ktor-server-core:3.6.1")
-    implementation("io.ktor:ktor-server-cio:3.6.1")
+    implementation("io.ktor:ktor-server-core:3.2.3")
+    implementation("io.ktor:ktor-server-cio:3.2.3")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("io.ktor:ktor-server-test-host:3.2.3")
+    testImplementation("io.ktor:ktor-client-content-negotiation:3.2.3")
+    testImplementation("org.json:json:20240303")
 }

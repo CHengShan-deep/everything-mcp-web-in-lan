@@ -1,6 +1,8 @@
 package dev.emwl.host
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -51,7 +53,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
                     HostScreen(
-                        onStart = { sites -> HostService.start(this, sites) },
+                        onStart = { HostService.start(this) },
                         onStop = { HostService.stop(this) },
                         onBatteryExemption = { requestBatteryExemption() },
                         onOpenAdmin = {
@@ -59,6 +61,12 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenHub = {
                             openUrl("http://${Metrics.lanIpv4() ?: "127.0.0.1"}:${Ports.HUB}/")
+                        },
+                        onCopyAdmin = {
+                            copyToken(HostState.runtime?.tokens?.admin ?: "")
+                        },
+                        onCopyMcp = {
+                            copyToken(HostState.runtime?.tokens?.mcp ?: "")
                         },
                         console = { consoleText() },
                     )
@@ -80,14 +88,13 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (intent.getBooleanExtra("autostart", false)) {
-            HostService.start(this, intent.getIntExtra("sites", HostState.desiredSites(this)))
+            HostService.start(this)
         }
     }
 
     private fun restoreIfNeeded() {
-        val sites = HostState.desiredSites(this)
-        if (sites > 0 && !HostState.running) {
-            HostService.start(this, sites)
+        if (!HostState.running) {
+            HostService.start(this)
         }
     }
 
@@ -112,6 +119,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun copyToken(token: String) {
+        if (token.isEmpty()) return
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("control token", token))
+    }
+
     private fun openUrl(url: String) {
         runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
     }
@@ -126,8 +139,13 @@ class MainActivity : ComponentActivity() {
         appendLine("batteryExempt=${power.isIgnoringBatteryOptimizations(packageName)} doze=${power.isDeviceIdleMode}")
         appendLine("pssKb=${Metrics.pssKb()} threads=${Metrics.threadCount()} fds=${Metrics.fileDescriptors()}")
         HostState.runtime?.let { runtime ->
-            runCatching { appendLine(runtime.diagJson()) }
-                .onFailure { appendLine("diagError=${it.message}") }
+            runCatching {
+                appendLine("adminToken=${runtime.tokens.admin}")
+                appendLine("mcpToken=${runtime.tokens.mcp}")
+                appendLine(runtime.service.listSites().joinToString("\n") { site ->
+                    "  ${site.slug} :${site.port} ${site.exposure} ${site.authRead}/${site.authWrite}"
+                })
+            }.onFailure { appendLine("diagError=${it.message}") }
         }
     }
 }
@@ -161,11 +179,13 @@ private fun HostNode(
 
 @Composable
 private fun HostScreen(
-    onStart: (Int) -> Unit,
+    onStart: () -> Unit,
     onStop: () -> Unit,
     onBatteryExemption: () -> Unit,
     onOpenAdmin: () -> Unit,
     onOpenHub: () -> Unit,
+    onCopyAdmin: () -> Unit,
+    onCopyMcp: () -> Unit,
     console: () -> String,
 ) {
     var consoleText by remember { mutableStateOf("") }
@@ -189,35 +209,32 @@ private fun HostScreen(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            HostNode("btn-start", "button", "Start", onClick = { onStart(0) }) {
-                Button(onClick = { onStart(0) }) { Text("Start") }
+            HostNode("btn-start", "button", "Start hosting", onClick = onStart) {
+                Button(onClick = onStart) { Text("Start hosting") }
             }
-            HostNode("btn-sites-8", "button", "8 sites", onClick = { onStart(8) }) {
-                Button(onClick = { onStart(8) }) { Text("8 sites") }
-            }
-            HostNode("btn-sites-20", "button", "20 sites", onClick = { onStart(20) }) {
-                Button(onClick = { onStart(20) }) { Text("20") }
-            }
-            HostNode("btn-sites-32", "button", "32 sites", onClick = { onStart(32) }) {
-                Button(onClick = { onStart(32) }) { Text("32") }
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             HostNode("btn-stop", "button", "Stop", onClick = onStop) {
                 OutlinedButton(onClick = onStop) { Text("Stop") }
             }
-            HostNode("btn-battery", "button", "Battery exemption", onClick = onBatteryExemption) {
-                OutlinedButton(onClick = onBatteryExemption) { Text("Battery exemption") }
-            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HostNode("btn-battery", "button", "Battery exemption", onClick = onBatteryExemption) {
+                OutlinedButton(onClick = onBatteryExemption) { Text("Battery exemption") }
+            }
             HostNode("btn-open-admin", "button", "Open admin", onClick = onOpenAdmin) {
                 OutlinedButton(onClick = onOpenAdmin) { Text("Open admin") }
             }
             HostNode("btn-open-hub", "button", "Open hub", onClick = onOpenHub) {
                 OutlinedButton(onClick = onOpenHub) { Text("Open hub") }
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HostNode("btn-copy-admin", "button", "Copy admin token", onClick = onCopyAdmin) {
+                OutlinedButton(onClick = onCopyAdmin) { Text("Copy admin token") }
+            }
+            HostNode("btn-copy-mcp", "button", "Copy MCP token", onClick = onCopyMcp) {
+                OutlinedButton(onClick = onCopyMcp) { Text("Copy MCP token") }
             }
         }
 

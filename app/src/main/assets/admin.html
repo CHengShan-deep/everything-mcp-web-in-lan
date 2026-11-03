@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>everything-mcp-web in LAN · admin</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; max-width: 960px; margin-inline: auto; }
+    h1 { font-size: 1.25rem; }
+    section { border: 1px solid #8884; border-radius: 8px; padding: .75rem; margin-block: .75rem; }
+    input, button, textarea { font: inherit; padding: .35rem .5rem; }
+    textarea { width: 100%; min-height: 8rem; font-family: ui-monospace, monospace; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { text-align: left; padding: .35rem; border-bottom: 1px solid #8883; }
+    .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    .muted { opacity: .7; font-size: .85rem; }
+    pre { background: #8881; padding: .5rem; overflow: auto; max-height: 16rem; }
+    code { font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+<h1>everything-mcp-web in LAN</h1>
+<p class="muted">Loopback-only console. Paste the admin token from the app.</p>
+
+<section id="auth">
+  <div class="row">
+    <input id="token" type="password" placeholder="admin token" size="48">
+    <button id="save">Use token</button>
+    <span id="authState" class="muted"></span>
+  </div>
+</section>
+
+<section id="overview" hidden>
+  <div class="row">
+    <span id="state" class="muted">loading…</span>
+    <button id="refresh">Refresh</button>
+  </div>
+</section>
+
+<section id="create" hidden>
+  <h2>New site</h2>
+  <div class="row">
+    <input id="slug" placeholder="slug (a-z, 0-9, -)" size="24">
+    <input id="name" placeholder="display name" size="28">
+    <button id="createBtn">Create</button>
+  </div>
+  <p class="muted">Creating returns a write token once. Store it.</p>
+</section>
+
+<section id="sitesBox" hidden>
+  <h2>Sites</h2>
+  <table>
+    <thead><tr><th>slug</th><th>port</th><th>exposure</th><th>read/write</th><th>actions</th></tr></thead>
+    <tbody id="sites"></tbody>
+  </table>
+</section>
+
+<section id="detail" hidden>
+  <h2 id="detailTitle">Site</h2>
+  <pre id="detailBody"></pre>
+  <h3>Deploy manifest</h3>
+  <textarea id="manifest" spellcheck="false"></textarea>
+  <div class="row">
+    <button id="deployBtn">Deploy</button>
+    <button id="rotateWrite">Rotate write token</button>
+    <button id="toggleExposure">Toggle LAN exposure</button>
+    <button id="toggleReadAuth">Toggle read auth</button>
+    <button id="deleteSite">Delete site</button>
+  </div>
+</section>
+
+<section>
+  <h2>Log</h2>
+  <pre id="log"></pre>
+</section>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let current = null;
+
+  const log = (msg) => {
+    const line = `[${new Date().toLocaleTimeString()}] ${typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2)}`;
+    $('log').textContent = line + "\n" + $('log').textContent;
+  };
+
+  const token = () => sessionStorage.getItem('adminToken') || '';
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, {
+      ...options,
+      headers: {
+        'content-type': 'application/json',
+        'authorization': `Bearer ${token()}`,
+        ...(options.headers || {}),
+      },
+    });
+    const text = await res.text();
+    let body;
+    try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+    if (!res.ok) {
+      const err = body.error || { code: res.status, message: 'request failed' };
+      log({ status: res.status, error: err });
+      throw new Error(err.code);
+    }
+    return body;
+  }
+
+  function reveal(on) {
+    for (const id of ['overview', 'create', 'sitesBox']) $(id).hidden = !on;
+    $('authState').textContent = on ? 'authenticated' : '';
+  }
+
+  async function refresh() {
+    const state = await api('/admin/api/state');
+    $('state').textContent =
+      `${state.sites}/${state.maxSites} sites · control 127.0.0.1:${state.controlPort} · LAN ${state.lanIpv4 || '-'}`;
+    const list = await api('/admin/api/sites');
+    const rows = $('sites');
+    rows.innerHTML = '';
+    for (const site of list.items) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><a href="#" data-ref="${site.id}">${site.slug}</a><br><span class="muted">${site.name}</span></td>
+        <td>${site.port}</td>
+        <td>${site.exposure}</td>
+        <td>${site.authRead}/${site.authWrite}</td>
+        <td><code class="muted">${site.urls.lan || site.urls.local}</code></td>`;
+      tr.querySelector('a').onclick = (e) => { e.preventDefault(); showDetail(site.id); };
+      rows.appendChild(tr);
+    }
+    reveal(true);
+  }
+
+  async function showDetail(ref) {
+    const data = await api(`/admin/api/sites/${ref}`);
+    current = { ref, site: data.site };
+    $('detail').hidden = false;
+    $('detailTitle').textContent = `${data.site.slug} · :${data.site.port}`;
+    $('detailBody').textContent = JSON.stringify({ urls: data.urls, tables: data.tables }, null, 2);
+    if (!($('manifest').value || '').trim() && data.manifest) {
+      $('manifest').value = JSON.stringify(data.manifest, null, 2);
+    }
+  }
+
+  $('save').onclick = async () => {
+    sessionStorage.setItem('adminToken', $('token').value.trim());
+    try { await refresh(); } catch { sessionStorage.removeItem('adminToken'); reveal(false); }
+  };
+
+  $('refresh').onclick = () => refresh().catch(() => {});
+
+  $('createBtn').onclick = async () => {
+    const slug = $('slug').value.trim();
+    const name = $('name').value.trim() || slug;
+    if (!slug) return log('slug required');
+    try {
+      const created = await api('/admin/api/sites', { method: 'POST', body: JSON.stringify({ slug, name }) });
+      log({ created: created.site.slug, writeToken: created.writeToken });
+      $('slug').value = ''; $('name').value = '';
+      await refresh();
+    } catch {}
+  };
+
+  $('deployBtn').onclick = async () => {
+    if (!current) return;
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/deploy`, {
+        method: 'POST',
+        body: JSON.stringify({ manifest: $('manifest').value }),
+      });
+      log(result);
+      await refresh();
+    } catch {}
+  };
+
+  $('rotateWrite').onclick = async () => {
+    if (!current) return;
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/token`, {
+        method: 'POST', body: JSON.stringify({ which: 'write' }),
+      });
+      log(result);
+    } catch {}
+  };
+
+  $('toggleExposure').onclick = async () => {
+    if (!current) return;
+    const lan = current.site.exposure !== 'lan';
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/exposure`, {
+        method: 'PUT', body: JSON.stringify({ lan }),
+      });
+      current.site = result.site;
+      log(result.urls);
+      await refresh();
+    } catch {}
+  };
+
+  $('toggleReadAuth').onclick = async () => {
+    if (!current) return;
+    const read = current.site.authRead === 'token' ? 'none' : 'token';
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/auth`, {
+        method: 'PUT', body: JSON.stringify({ read }),
+      });
+      log(result);
+      current.site = result.site;
+      await refresh();
+    } catch {}
+  };
+
+  $('deleteSite').onclick = async () => {
+    if (!current) return;
+    if (!confirm(`Delete ${current.site.slug}?`)) return;
+    try {
+      log(await api(`/admin/api/sites/${current.ref}`, { method: 'DELETE' }));
+      current = null;
+      $('detail').hidden = true;
+      await refresh();
+    } catch {}
+  };
+
+  if (token()) {
+    $('token').value = token();
+    refresh().catch(() => reveal(false));
+  }
+})();
+</script>
+</body>
+</html>
