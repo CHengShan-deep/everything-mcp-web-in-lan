@@ -29,5 +29,8 @@ secrets.properties
 PLAN.md
 PROGRESS.md
 
+# P0 spike (kept local until implementation starts)
+spike/
+
 # Logs
 *.log
