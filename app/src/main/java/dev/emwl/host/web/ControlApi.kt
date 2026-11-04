@@ -336,6 +336,25 @@ fun Application.controlModule(
                     )
                 }
             }
+
+            get("/sites/{ref}/revisions") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    service.revisions().list(site)
+                        .put("current", service.revisions().current(site))
+                }
+            }
+
+            post("/sites/{ref}/revisions/{revision}/rollback") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    service.revisions().rollback(
+                        site,
+                        call.parameters["revision"].orEmpty(),
+                        body.optBoolean("confirm", false),
+                    )
+                }
+            }
         }
     }
 

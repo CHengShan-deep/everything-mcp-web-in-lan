@@ -25,6 +25,8 @@ class SiteService(private val context: Context) {
     private val fileIndexes = ConcurrentHashMap<String, SiteFileIndex>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listeners = ConcurrentHashMap<String, SiteListenerHandle>()
+    /** Serializes listener start/stop so two starts cannot race for the same port. */
+    private val listenerLock = Any()
 
     @Volatile var baseDomain: String = "lan"
 
@@ -71,6 +73,7 @@ class SiteService(private val context: Context) {
             readTokenHash = null,
             writeTokenHash = Tokens.sha256Hex(writeToken),
             manifestJson = null,
+            servedRevision = null,
             createdAt = now,
             updatedAt = now,
         )
@@ -83,7 +86,7 @@ class SiteService(private val context: Context) {
 
     fun deleteSite(id: String): Boolean {
         val site = repository.find(id) ?: return false
-        listeners.remove(id)?.stop()
+        stopListenerFor(id)
         databases.remove(id)?.close()
         fileIndexes.remove(id)
         publicDir(site).parentFile?.deleteRecursively()
@@ -172,43 +175,87 @@ class SiteService(private val context: Context) {
     fun deploy(id: String, manifestJson: String, files: Map<String, String>): JSONObject {
         val site = requireSite(id)
         val incoming = Manifest.parse(manifestJson)
+        val storedManifest = manifestJson(incoming)
 
-        val publicDir = publicDir(site)
+        val public = publicDir(site)
+        val staging = File(
+            public.parentFile,
+            "public.stage-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}",
+        )
         val written = ArrayList<String>()
         val rejected = ArrayList<String>()
+        var backup: File? = null
+        var capture: SiteRevisionService.Capture? = null
 
-        files.forEach { (path, content) ->
-            if (!Manifest.isSafeRelativePath(path)) {
-                rejected += path
-                return@forEach
+        try {
+            // Build the next tree beside the live one; nothing is visible until the swap.
+            FileTrees.copy(public, staging)
+
+            files.forEach { (path, content) ->
+                if (!Manifest.isSafeRelativePath(path)) {
+                    rejected += path
+                    return@forEach
+                }
+                val canonicalRoot = staging.canonicalFile
+                val target = File(staging, path).canonicalFile
+                if (!target.path.startsWith(canonicalRoot.path + File.separator)) {
+                    rejected += path
+                    return@forEach
+                }
+                target.parentFile?.mkdirs()
+                target.writeText(content)
+                written += path
             }
-            val target = File(publicDir, path)
-            val canonicalRoot = publicDir.canonicalFile
-            val canonicalTarget = target.canonicalFile
-            if (!canonicalTarget.path.startsWith(canonicalRoot.path + File.separator)) {
-                rejected += path
-                return@forEach
+
+            // Capture, migrate, swap and record under the content lock so a concurrent
+            // deploy or rollback cannot interleave with this one.
+            val result = revisions().contentLocked {
+                val captured = revisions().capture(site, storedManifest.toByteArray(Charsets.UTF_8), staging)
+                capture = captured
+                val schemaResult = database(site).applySchema(incoming)
+
+                backup = FileTrees.install(staging, public)
+                val updated = site.copy(
+                    manifestJson = storedManifest,
+                    servedRevision = captured.id,
+                    updatedAt = System.currentTimeMillis(),
+                )
+                try {
+                    repository.update(updated)
+                } catch (t: Throwable) {
+                    FileTrees.revert(public, backup)
+                    backup = null
+                    throw t
+                }
+                backup?.deleteRecursively()
+                backup = null
+                audit(
+                    "site_deploy",
+                    updated,
+                    "written=${written.size} rejected=${rejected.size} revision=${captured.id}",
+                )
+                Triple(updated, schemaResult, captured)
             }
-            target.parentFile?.mkdirs()
-            target.writeText(content)
-            written += path
+
+            return JSONObject()
+                .put("site", siteJson(result.first))
+                .put("writtenFiles", written.size)
+                .put("rejectedFiles", rejected)
+                .put("schema", result.second)
+                .put(
+                    "revision",
+                    JSONObject()
+                        .put("id", result.third.id)
+                        .put("contentHash", result.third.contentHash)
+                        .put("created", result.third.created)
+                )
+        } catch (t: Throwable) {
+            capture?.let { revisions().discard(site, it) }
+            throw t
+        } finally {
+            staging.deleteRecursively()
+            backup?.deleteRecursively()
         }
-
-        val schemaResult = database(site).applySchema(incoming)
-
-        val storedManifest = manifestJson(incoming)
-        val updated = site.copy(
-            manifestJson = storedManifest,
-            updatedAt = System.currentTimeMillis(),
-        )
-        repository.update(updated)
-        audit("site_deploy", updated, "written=${written.size} rejected=${rejected.size}")
-
-        return JSONObject()
-            .put("site", siteJson(updated))
-            .put("writtenFiles", written.size)
-            .put("rejectedFiles", rejected)
-            .put("schema", schemaResult)
     }
 
     val limiter = dev.emwl.host.domain.WriteLimiter()
@@ -245,6 +292,7 @@ class SiteService(private val context: Context) {
         .put("authRead", site.authRead)
         .put("authWrite", site.authWrite)
         .put("hasManifest", site.manifestJson != null)
+        .put("servedRevision", site.servedRevision ?: JSONObject.NULL)
         .put("createdAt", site.createdAt)
         .put("updatedAt", site.updatedAt)
 
@@ -255,26 +303,60 @@ class SiteService(private val context: Context) {
         listeners.put(id, handle)?.stop()
     }
 
-    fun restartListener(site: SiteRecord) {
-        listeners.remove(site.id)?.stop()
-        startListener(site)
-    }
-
     fun startListener(site: SiteRecord) {
         val self = this
         scope.launch {
-            runCatching {
-                listeners.remove(site.id)?.stop()
-                listeners[site.id] = SiteListenerHandle.start(context, site, self)
-            }.onFailure { lastListenerError = "${it.javaClass.simpleName}: ${it.message}" }
+            synchronized(listenerLock) {
+                runCatching {
+                    revisions().recover(site)
+                    val host = hostFor(site)
+                    if (listeners[site.id]?.boundTo(host, site.port) == true) return@synchronized
+                    listeners.remove(site.id)?.stop()
+                    bindOrThrow(host, site.port)
+                    listeners[site.id] = SiteListenerHandle.start(context, site, self)
+                    lastListenerError = null
+                }.onFailure { lastListenerError = "${it.javaClass.simpleName}: ${it.message}" }
+            }
+        }
+    }
+
+    /** Only needed when the bind address changes: routes read the site record per request. */
+    fun restartListener(site: SiteRecord) {
+        val self = this
+        scope.launch {
+            synchronized(listenerLock) {
+                runCatching {
+                    revisions().recover(site)
+                    listeners.remove(site.id)?.stop()
+                    val host = hostFor(site)
+                    bindOrThrow(host, site.port)
+                    listeners[site.id] = SiteListenerHandle.start(context, site, self)
+                    lastListenerError = null
+                }.onFailure { lastListenerError = "${it.javaClass.simpleName}: ${it.message}" }
+            }
+        }
+    }
+
+    private fun hostFor(site: SiteRecord): String = if (site.isLanExposed) "0.0.0.0" else "127.0.0.1"
+
+    /**
+     * Probes the port before Ktor takes it: a bind failure inside the engine's accept job is
+     * asynchronous and would take the whole process down instead of being reported.
+     */
+    private fun bindOrThrow(host: String, port: Int) {
+        java.net.ServerSocket().use { socket ->
+            socket.reuseAddress = true
+            socket.bind(java.net.InetSocketAddress(host, port))
         }
     }
 
      var lastListenerError: String? = null
 
     fun stopAllListeners() {
-        listeners.values.forEach { runCatching { it.stop() } }
-        listeners.clear()
+        synchronized(listenerLock) {
+            listeners.values.forEach { runCatching { it.stop() } }
+            listeners.clear()
+        }
     }
 
     fun close() {
@@ -346,7 +428,7 @@ class SiteService(private val context: Context) {
     }
 
     fun stopListenerFor(id: String) {
-        listeners.remove(id)?.stop()
+        synchronized(listenerLock) { listeners.remove(id)?.stop() }
     }
 
     fun siteDirOf(site: SiteRecord): File =
@@ -356,5 +438,9 @@ class SiteService(private val context: Context) {
         File(File(context.noBackupFilesDir, "sites"), "${site.id}.db")
 
     fun backups(): SiteBackupService = SiteBackupService(context, this)
+
+    private val revisionService: SiteRevisionService by lazy { SiteRevisionService(this) }
+
+    fun revisions(): SiteRevisionService = revisionService
 }
 

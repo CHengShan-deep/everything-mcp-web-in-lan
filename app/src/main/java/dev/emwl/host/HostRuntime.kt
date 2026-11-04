@@ -75,14 +75,6 @@ class HostRuntime(private val ctx: Context) {
 
     fun restartSite(site: dev.emwl.host.data.SiteRecord) {
         service.restartListener(site)
-        runCatching { service.startListener(site) }
-            .onFailure {
-                errors.put(
-                    JSONObject()
-                        .put("site", site.slug)
-                        .put("error", "${it.javaClass.simpleName}: ${it.message}")
-                )
-            }
     }
 
     fun listenersJson(): JSONArray = JSONArray().apply {

@@ -75,6 +75,12 @@
   </div>
   <ul id="backups"></ul>
 
+  <h3>Revisions</h3>
+  <div class="row">
+    <span id="revisionState" class="muted"></span>
+  </div>
+  <ul id="revisions"></ul>
+
   <h3>Deploy manifest</h3>
   <textarea id="manifest" spellcheck="false"></textarea>
   <div class="row">
@@ -200,6 +206,40 @@
     }
     await refreshFiles().catch(() => {});
     await refreshBackups().catch(() => {});
+    await refreshRevisions().catch(() => {});
+  }
+
+  async function refreshRevisions() {
+    if (!current) return;
+    const data = await api(`/admin/api/sites/${current.ref}/revisions`);
+    const live = data.current || {};
+    $('revisionState').textContent = live.servedRevision
+      ? `serving ${live.servedRevision}${live.matchesServed ? '' : ' · content drifted from the recorded revision'}`
+      : 'no revision recorded yet';
+    const list = $('revisions');
+    list.innerHTML = '';
+    for (const r of data.items) {
+      const li = document.createElement('li');
+      const when = new Date(r.createdAt).toLocaleString();
+      const digest = String(r.contentHash || '').slice(0, 12);
+      li.textContent = `${r.id} · ${when} · ${r.files} file(s) · ${r.bytes} bytes · ${digest}${r.current ? ' · current' : ''} `;
+      if (!r.current) {
+        const rollback = document.createElement('button');
+        rollback.textContent = 'roll back';
+        rollback.onclick = async () => {
+          if (!confirm(`Serve ${r.id} again? Data and uploaded files are kept.`)) return;
+          try {
+            log(await api(`/admin/api/sites/${current.ref}/revisions/${r.id}/rollback`, {
+              method: 'POST',
+              body: JSON.stringify({ confirm: true }),
+            }));
+            await showDetail(current.ref);
+          } catch {}
+        };
+        li.appendChild(rollback);
+      }
+      list.appendChild(li);
+    }
   }
 
   async function refreshBackups() {

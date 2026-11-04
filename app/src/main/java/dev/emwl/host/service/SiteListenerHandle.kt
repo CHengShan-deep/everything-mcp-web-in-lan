@@ -31,11 +31,17 @@ import io.ktor.server.routing.routing
 import org.json.JSONObject
 import java.io.File
 
-class SiteListenerHandle private constructor(private val engine: EmbeddedServer<*, *>) {
+class SiteListenerHandle private constructor(
+    private val engine: EmbeddedServer<*, *>,
+    private val host: String,
+    private val port: Int,
+) {
 
     fun stop() {
         runCatching { engine.stop(300, 800) }
     }
+
+    fun boundTo(host: String, port: Int): Boolean = this.host == host && this.port == port
 
     companion object {
         fun start(context: Context, site: SiteRecord, service: SiteService): SiteListenerHandle {
@@ -43,7 +49,7 @@ class SiteListenerHandle private constructor(private val engine: EmbeddedServer<
             val engine = embeddedServer(CIO, host = host, port = site.port) {
                 siteModule(context, site.id, service)
             }.start(wait = false)
-            return SiteListenerHandle(engine)
+            return SiteListenerHandle(engine, host, site.port)
         }
     }
 }

@@ -360,6 +360,39 @@ class McpTools(
                 args.optBoolean("confirm", false),
             )
         },
+
+        tool(
+            "site_revision_list",
+            "List stored content revisions (newest first) and mark the one being served.",
+            schema(required = listOf("site")) { prop("site", "string") },
+        ) { args ->
+            service.revisions().list(service.resolveSite(args.requireString("site")))
+        },
+
+        tool(
+            "site_revision_current",
+            "Report the served revision, the live content digest and whether they still match.",
+            schema(required = listOf("site")) { prop("site", "string") },
+        ) { args ->
+            service.revisions().current(service.resolveSite(args.requireString("site")))
+        },
+
+        tool(
+            "site_revision_rollback",
+            "Serve a stored revision again. Requires confirm=true; data and uploaded files are untouched.",
+            schema(required = listOf("site", "revision", "confirm")) {
+                prop("site", "string")
+                prop("revision", "string")
+                prop("confirm", "boolean")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.revisions().rollback(
+                site,
+                args.requireString("revision"),
+                args.optBoolean("confirm", false),
+            )
+        },
     )
 
     private val byName = tools.associateBy { it.name }
