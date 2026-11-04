@@ -45,6 +45,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 - Battery-optimization exemption is required for LAN availability while the device is in Doze.
 - Some OEM builds (for example MIUI) block autostart after reboot: open the app once after a reboot, or allow autostart for it in system settings.
+- A fresh sideload may need the OEM installer's in-person confirmation (within about ten seconds); on MIUI also enable "Install via USB" in developer options.
 - The control plane is loopback-only. LAN exposure is explicit per site.
 
 ## Docs
