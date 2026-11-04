@@ -297,6 +297,26 @@
         } catch {}
       };
       li.appendChild(restore);
+
+      const restoreAs = document.createElement('button');
+      restoreAs.textContent = 'restore as new…';
+      restoreAs.onclick = async () => {
+        const slug = prompt(`Slug for the new site restored from ${b.id}?`, `${current.site.slug}-copy`);
+        if (!slug) return;
+        const name = prompt('Name for the new site?', slug);
+        if (!name) return;
+        try {
+          const result = await api(`/admin/api/sites/${current.ref}/backups/${b.id}/restore-as`, {
+            method: 'POST',
+            body: JSON.stringify({ slug, name, confirm: true }),
+          });
+          log(result);
+          await refresh();
+          await showDetail(result.site.slug);
+        } catch {}
+      };
+      li.appendChild(restoreAs);
+
       list.appendChild(li);
     }
   }

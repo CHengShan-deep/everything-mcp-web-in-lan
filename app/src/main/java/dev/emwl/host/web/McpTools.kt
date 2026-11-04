@@ -381,6 +381,27 @@ class McpTools(
         },
 
         tool(
+            "site_backup_restore_as",
+            "Restore a backup into a new site (own id, port and write token). Requires confirm=true.",
+            schema(required = listOf("site", "backup", "slug", "name", "confirm")) {
+                prop("site", "string")
+                prop("backup", "string")
+                prop("slug", "string")
+                prop("name", "string")
+                prop("confirm", "boolean")
+            },
+        ) { args ->
+            val source = service.resolveSite(args.requireString("site"))
+            service.backups().restoreAsNew(
+                source,
+                args.requireString("backup"),
+                args.requireString("slug"),
+                args.requireString("name"),
+                args.optBoolean("confirm", false),
+            )
+        },
+
+        tool(
             "site_revision_list",
             "List stored content revisions (newest first) and mark the one being served.",
             schema(required = listOf("site")) { prop("site", "string") },

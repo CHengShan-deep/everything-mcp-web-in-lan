@@ -54,6 +54,7 @@ class SiteService(private val context: Context) {
         File(File(context.noBackupFilesDir, "sites/${site.id}"), "public").apply { mkdirs() }
 
     fun createSite(slug: String, name: String): JSONObject {
+        dev.emwl.host.domain.Identifiers.requireSlug(slug)
         if (repository.findBySlug(slug) != null) {
             throw DomainException("SLUG_TAKEN", "slug is already used: $slug")
         }
@@ -288,11 +289,12 @@ class SiteService(private val context: Context) {
 
     fun urls(site: SiteRecord, lanIp: String? = dev.emwl.host.Metrics.lanIpv4()): JSONObject {
         val local = "http://127.0.0.1:${site.port}"
-        val lan = lanIp?.let { "http://$it:${site.port}" }
+        // A LAN address only exists once the site is actually exposed to the LAN.
+        val lan = if (site.isLanExposed) lanIp?.let { "http://$it:${site.port}" } else null
         val named = "http://${site.slug}.$baseDomain"
         return JSONObject()
             .put("local", local)
-            .put("lan", lan)
+            .put("lan", lan ?: JSONObject.NULL)
             .put("named", named)
             .put("exposure", site.exposure)
             .put("stable", site.exposure == SiteRecord.EXPOSURE_LAN)

@@ -170,6 +170,131 @@ class SiteBackupService(private val context: Context, private val service: SiteS
         }
     }
 
+    /**
+     * Restores one site's archive into a brand new site: new id, port and write token, its own
+     * request log, and a baseline revision for what it serves. The source site is untouched.
+     */
+    fun restoreAsNew(
+        sourceSite: SiteRecord,
+        backupId: String,
+        slug: String,
+        name: String,
+        confirm: Boolean,
+    ): JSONObject {
+        if (!confirm) {
+            throw DomainException("CONFIRM_REQUIRED", "restoring creates a new site; pass confirm=true")
+        }
+        if (!backupId.matches(Regex("^backup-[0-9]+$"))) {
+            throw DomainException("INVALID_ARGUMENT", "invalid backup id")
+        }
+        val zipFile = File(backupDir(sourceSite), "$backupId.zip")
+        if (!zipFile.isFile) throw DomainException("NOT_FOUND", "backup not found")
+
+        val created = service.createSite(slug, name)
+        val writeToken = created.getString("writeToken")
+        val target = service.resolveSite(created.getJSONObject("site").getString("id"))
+
+        val staging = File(context.cacheDir, "restore-as-${target.id}-${System.currentTimeMillis()}")
+        try {
+            staging.mkdirs()
+            extractSafely(zipFile, staging)
+
+            val snapshot = File(staging, "data.db")
+            if (!snapshot.isFile) throw DomainException("BUNDLE_REJECTED", "backup has no database")
+            verifyQuickCheck(snapshot)
+
+            val manifest = File(staging, "manifest.json")
+                .takeIf { it.isFile }
+                ?.let { Manifest.parse(it.readText()) }
+
+            service.closeDatabase(target.id)
+
+            val dbFile = service.databaseFileOf(target)
+            File("${dbFile.path}-wal").delete()
+            File("${dbFile.path}-shm").delete()
+            File("${dbFile.path}-journal").delete()
+            dbFile.parentFile?.mkdirs()
+            snapshot.copyTo(dbFile, overwrite = true)
+
+            val publicDir = File(service.siteDirOf(target), "public")
+            publicDir.deleteRecursively()
+            publicDir.mkdirs()
+            copyTree(File(staging, "public"), publicDir)
+
+            val filesDir = File(service.siteDirOf(target), "files")
+            filesDir.deleteRecursively()
+            filesDir.mkdirs()
+            copyTree(File(staging, "files"), filesDir)
+
+            val fresh = service.database(target)
+            fresh.ensureFileTable()
+            fresh.writableDb().delete("_files", null, null)
+            // The new site starts with an empty request log: the archive's entries belong to the source.
+            fresh.writableDb().delete("_requests", null, null)
+
+            var fileCount = 0
+            val metaFile = File(staging, "files.json")
+            if (metaFile.isFile) {
+                val items = JSONArray(metaFile.readText())
+                val index = service.fileStore(target).index
+                for (position in 0 until items.length()) {
+                    val item = items.getJSONObject(position)
+                    index.insert(
+                        FileRecord(
+                            id = item.getString("id"),
+                            name = item.getString("name"),
+                            mime = item.getString("mime"),
+                            size = item.getLong("size"),
+                            sha256 = item.getString("sha256"),
+                            createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                        )
+                    )
+                    fileCount += 1
+                }
+            }
+
+            val storedManifest = manifest?.let { parsed ->
+                val json = service.manifestJson(parsed)
+                fresh.applySchema(parsed)
+                json
+            } ?: target.manifestJson
+
+            val baseline = storedManifest?.let {
+                service.revisions().capture(
+                    target,
+                    it.toByteArray(Charsets.UTF_8),
+                    publicDir,
+                )
+            }
+
+            val updated = target.copy(
+                manifestJson = storedManifest,
+                servedRevision = baseline?.id,
+                updatedAt = System.currentTimeMillis(),
+            )
+            service.repository().update(updated)
+            service.startListener(updated)
+            service.audit("backup_restore_as", updated, "$backupId from ${sourceSite.slug}")
+
+            return JSONObject()
+                .put("created", true)
+                .put("backup", backupId)
+                .put("sourceSite", sourceSite.slug)
+                .put("tables", org.json.JSONArray(manifest?.tables?.keys?.toList() ?: emptyList<String>()))
+                .put("files", fileCount)
+                .put("revision", baseline?.id ?: JSONObject.NULL)
+                .put("writeToken", writeToken)
+                .put("site", service.siteJson(updated))
+                .put("urls", service.urls(updated))
+        } catch (t: Throwable) {
+            // A half-imported site must not stay behind.
+            runCatching { service.deleteSite(target.id) }
+            throw t
+        } finally {
+            staging.deleteRecursively()
+        }
+    }
+
     private fun prune(site: SiteRecord) {
         val backups = backupDir(site).listFiles { file -> file.isFile && file.name.endsWith(".zip") }
             ?.sortedBy { it.name }

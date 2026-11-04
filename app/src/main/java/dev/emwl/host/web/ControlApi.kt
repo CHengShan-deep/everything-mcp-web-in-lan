@@ -346,6 +346,19 @@ fun Application.controlModule(
                 }
             }
 
+            post("/sites/{ref}/backups/{backup}/restore-as") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    service.backups().restoreAsNew(
+                        site,
+                        call.parameters["backup"].orEmpty(),
+                        body.optString("slug"),
+                        body.optString("name"),
+                        body.optBoolean("confirm", false),
+                    )
+                }
+            }
+
             get("/sites/{ref}/revisions") {
                 call.api {
                     val site = service.resolveSite(call.parameters["ref"].orEmpty())
