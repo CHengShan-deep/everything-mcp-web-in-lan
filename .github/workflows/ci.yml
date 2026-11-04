@@ -2,16 +2,25 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Verify required docs
         run: |
           test -f README.md
@@ -19,26 +28,53 @@ jobs:
           grep -q "MIT License" LICENSE
           grep -q "everything-mcp-web in LAN" README.md
           grep -q '^PLAN.md$' .gitignore
+      - name: Verify the Gradle wrapper is executable
+        run: test -x gradlew
 
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
-      - name: Install SDK packages
+      - name: Ensure the Gradle wrapper is executable
+        run: chmod +x gradlew && test -x gradlew
+      - name: Install missing SDK packages
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ -x "$SDKMANAGER" ]; then
-            yes | "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" > /dev/null || true
+          if [ ! -d "$ANDROID_HOME/platforms/android-36" ]; then
+            "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
           fi
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build and test
-        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest
+      - name: Build, test and lint
+        run: ./gradlew --stacktrace --build-cache assembleDebug testDebugUnitTest lintDebug
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            app/build/test-results/**
+            app/build/reports/tests/**
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
