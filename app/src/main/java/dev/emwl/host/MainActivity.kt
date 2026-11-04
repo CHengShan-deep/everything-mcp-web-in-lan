@@ -204,8 +204,8 @@ private fun HostScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        HostNode("title", "text", "everything-mcp-web in LAN") {
-            Text("everything-mcp-web in LAN", style = MaterialTheme.typography.headlineSmall)
+        HostNode("title", "text", "PocketServe") {
+            Text("PocketServe", style = MaterialTheme.typography.headlineSmall)
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

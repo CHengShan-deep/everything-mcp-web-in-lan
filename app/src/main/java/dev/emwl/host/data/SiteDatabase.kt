@@ -9,9 +9,13 @@ import dev.emwl.host.domain.DomainException
 import dev.emwl.host.domain.FieldDef
 import dev.emwl.host.domain.FieldType
 import dev.emwl.host.domain.QueryFilters.Filter
+import dev.emwl.host.domain.ColumnState
 import dev.emwl.host.domain.Manifest
 import dev.emwl.host.domain.QueryFilters
+import dev.emwl.host.domain.SchemaDiff
+import dev.emwl.host.domain.SchemaPlan
 import dev.emwl.host.domain.TableDef
+import dev.emwl.host.domain.TableState
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -98,38 +102,181 @@ class SiteDatabase(context: Context, siteId: String) {
         return result
     }
 
-    fun applySchema(manifest: Manifest): JSONObject {
+    fun schemaPlan(manifest: Manifest): SchemaPlan = SchemaDiff.plan(tableStates(), manifest)
+
+    /**
+     * Migrates the database toward [manifest]. Additive changes apply silently; anything that
+     * drops or rewrites stored data is refused unless the caller confirms it, and the whole
+     * migration runs in one transaction so a failure leaves the previous schema intact.
+     */
+    fun applySchema(manifest: Manifest, allowDestructive: Boolean = false): JSONObject {
         ensureFileTable()
+        ensureRequestTable()
+
+        val plan = schemaPlan(manifest)
+        if (plan.destructive.isNotEmpty() && !allowDestructive) {
+            throw DomainException(
+                "SCHEMA_DESTRUCTIVE",
+                "destructive schema changes require confirmDestructive=true: ${plan.summary()}"
+            )
+        }
+
         val created = JSONArray()
         val altered = JSONArray()
+        val rebuilt = JSONArray()
+        val dropped = JSONArray()
         val indexes = JSONArray()
+        val now = System.currentTimeMillis()
+        val states = tableStates().associateBy { it.name }
 
-        manifest.tables.values.forEach { table ->
-            val existing = columnsOf(table.name)
-            if (existing.isEmpty()) {
-                db.execSQL(createTableSql(table))
-                created.put(table.name)
-            } else {
-                table.fields.forEach { field ->
-                    if (field.name !in existing) {
-                        db.execSQL("ALTER TABLE \"${table.name}\" ADD COLUMN ${columnSql(field)}")
-                        altered.put("${table.name}.${field.name}")
+        db.beginTransaction()
+        try {
+            plan.dropTables.forEach { name ->
+                db.execSQL("DROP TABLE IF EXISTS \"$name\"")
+                dropped.put(name)
+            }
+
+            manifest.tables.values.forEach { table ->
+                val state = states[table.name]
+                when {
+                    state == null -> {
+                        db.execSQL(createTableSql(table))
+                        created.put(table.name)
+                    }
+                    table.name in plan.rebuild -> {
+                        rebuildTable(table, state, now)
+                        rebuilt.put(table.name)
+                    }
+                    else -> {
+                        val existing = state.columns.map { it.name }.toSet()
+                        table.fields.filter { it.name !in existing }.forEach { field ->
+                            db.execSQL("ALTER TABLE \"${table.name}\" ADD COLUMN ${columnSql(field)}")
+                            altered.put("${table.name}.${field.name}")
+                        }
                     }
                 }
             }
-            table.indexes.forEach { columns ->
-                val name = "idx_${table.name}_${columns.joinToString("_")}"
-                db.execSQL(
-                    "CREATE INDEX IF NOT EXISTS \"$name\" ON \"${table.name}\" (${columns.joinToString(", ") { "\"$it\"" }})"
-                )
-                indexes.put(name)
+
+            manifest.tables.values.forEach { table ->
+                table.indexes.forEach { columns ->
+                    val name = "idx_${table.name}_${columns.joinToString("_")}"
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS \"$name\" ON \"${table.name}\" (${columns.joinToString(", ") { "\"$it\"" }})"
+                    )
+                    indexes.put(name)
+                }
             }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
 
         return JSONObject()
             .put("created", created)
             .put("altered", altered)
+            .put("rebuilt", rebuilt)
+            .put("dropped", dropped)
             .put("indexes", indexes)
+            .put("destructive", plan.toJson().getJSONArray("destructive"))
+    }
+
+    private fun tableStates(): List<TableState> {
+        val names = ArrayList<String>()
+        db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(0)
+                if (name !in INTERNAL_TABLES) names += name
+            }
+        }
+        return names.sorted().map { name ->
+            val columns = ArrayList<ColumnState>()
+            db.rawQuery("PRAGMA table_info(\"$name\")", null).use { cursor ->
+                while (cursor.moveToNext()) {
+                    columns += ColumnState(
+                        name = cursor.getString(cursor.getColumnIndexOrThrow("name")),
+                        type = cursor.getString(cursor.getColumnIndexOrThrow("type")),
+                        notNull = cursor.getInt(cursor.getColumnIndexOrThrow("notnull")) != 0,
+                    )
+                }
+            }
+            val rows = db.rawQuery("SELECT COUNT(*) FROM \"$name\"", null).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+            TableState(name, columns, rows)
+        }
+    }
+
+    /**
+     * Rewrites one table in place: the rows keep their ids, declared columns are copied,
+     * removed columns disappear, and new required columns are filled with their default.
+     */
+    private fun rebuildTable(table: TableDef, state: TableState, now: Long) {
+        val temporary = "${table.name}__new"
+        val existing = state.columns.map { it.name }.toSet()
+        val previousSequence = sequenceOf(table.name)
+
+        db.execSQL("DROP TABLE IF EXISTS \"$temporary\"")
+        db.execSQL(createTableSql(table).replaceFirst("\"${table.name}\"", "\"$temporary\""))
+
+        val targets = ArrayList<String>()
+        val sources = ArrayList<String>()
+        targets += "\"id\""
+        sources += "\"id\""
+        table.fields.forEach { field ->
+            targets += "\"${field.name}\""
+            sources += if (field.name in existing) "\"${field.name}\"" else backfillSql(field, now)
+        }
+
+        db.execSQL(
+            "INSERT INTO \"$temporary\" (${targets.joinToString(", ")}) " +
+                "SELECT ${sources.joinToString(", ")} FROM \"${table.name}\""
+        )
+        db.execSQL("DROP TABLE \"${table.name}\"")
+        db.execSQL("ALTER TABLE \"$temporary\" RENAME TO \"${table.name}\"")
+        restoreSequence(table.name, temporary, previousSequence)
+    }
+
+    private fun sequenceOf(table: String): Long {
+        if (!sqliteSequenceExists()) return 0L
+        return db.rawQuery("SELECT seq FROM sqlite_sequence WHERE name = ?", arrayOf(table)).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        }
+    }
+
+    /** Keeps AUTOINCREMENT from handing out ids that were used before the rewrite. */
+    private fun restoreSequence(table: String, temporary: String, previous: Long) {
+        if (!sqliteSequenceExists()) return
+        db.execSQL("DELETE FROM sqlite_sequence WHERE name IN (?, ?)", arrayOf(table, temporary))
+        val maxId = db.rawQuery("SELECT COALESCE(MAX(id), 0) FROM \"$table\"", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        }
+        val next = maxOf(previous, maxId)
+        if (next > 0) {
+            db.execSQL(
+                "INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)",
+                arrayOf(table, next),
+            )
+        }
+    }
+
+    private fun sqliteSequenceExists(): Boolean =
+        db.rawQuery("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'", null)
+            .use { it.moveToFirst() }
+
+    private fun backfillSql(field: FieldDef, now: Long): String = when (field.type) {
+        FieldType.INT, FieldType.BOOLEAN -> when (field.default?.lowercase()) {
+            "true" -> "1"
+            "false" -> "0"
+            else -> (field.default?.toLongOrNull() ?: 0L).toString()
+        }
+        FieldType.REAL -> (field.default?.toDoubleOrNull() ?: 0.0).toString()
+        FieldType.DATETIME -> {
+            val parsed = field.default
+                ?.takeIf { it != "now" }
+                ?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+            (parsed ?: now).toString()
+        }
+        FieldType.TEXT, FieldType.JSON -> "'${(field.default ?: "").replace("'", "''")}'"
     }
 
     fun list(
@@ -438,13 +585,6 @@ class SiteDatabase(context: Context, siteId: String) {
         return row
     }
 
-    private fun columnsOf(table: String): Set<String> {
-        val columns = HashSet<String>()
-        db.rawQuery("PRAGMA table_info(\"$table\")", null).use { cursor ->
-            while (cursor.moveToNext()) columns += cursor.getString(cursor.getColumnIndexOrThrow("name"))
-        }
-        return columns
-    }
 
     private fun createTableSql(table: TableDef): String = buildString {
         append("CREATE TABLE \"${table.name}\" (id INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -483,5 +623,6 @@ class SiteDatabase(context: Context, siteId: String) {
         const val MAX_PATH_CHARS = 512
         private val STATUS_CODE = Regex("^[0-9]{3}$")
         private val STATUS_CLASS = Regex("^[1-5]xx$")
+        private val INTERNAL_TABLES = setOf("_files", "_requests", "android_metadata", "sqlite_sequence")
     }
 }

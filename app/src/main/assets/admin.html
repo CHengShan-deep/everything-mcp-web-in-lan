@@ -252,13 +252,21 @@
         rollback.textContent = 'roll back';
         rollback.onclick = async () => {
           if (!confirm(`Serve ${r.id} again? Data and uploaded files are kept.`)) return;
+          const run = (confirmDestructive) => api(`/admin/api/sites/${current.ref}/revisions/${r.id}/rollback`, {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true, confirmDestructive }),
+          });
           try {
-            log(await api(`/admin/api/sites/${current.ref}/revisions/${r.id}/rollback`, {
-              method: 'POST',
-              body: JSON.stringify({ confirm: true }),
-            }));
+            log(await run(false));
             await showDetail(current.ref);
-          } catch {}
+          } catch (e) {
+            if (e.message !== 'SCHEMA_DESTRUCTIVE') return;
+            if (!confirm(`${r.id} would also drop stored data. Roll back anyway?`)) return;
+            try {
+              log(await run(true));
+              await showDetail(current.ref);
+            } catch {}
+          }
         };
         li.appendChild(rollback);
       }
@@ -373,14 +381,29 @@
 
   $('deployBtn').onclick = async () => {
     if (!current) return;
+    const manifest = $('manifest').value;
+    const deploy = (confirmDestructive) => api(`/admin/api/sites/${current.ref}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify({ manifest, confirmDestructive }),
+    });
     try {
-      const result = await api(`/admin/api/sites/${current.ref}/deploy`, {
-        method: 'POST',
-        body: JSON.stringify({ manifest: $('manifest').value }),
-      });
-      log(result);
+      log(await deploy(false));
       await refresh();
-    } catch {}
+    } catch (e) {
+      if (e.message !== 'SCHEMA_DESTRUCTIVE') return;
+      try {
+        const plan = await api(`/admin/api/sites/${current.ref}/schema-plan`, {
+          method: 'POST',
+          body: JSON.stringify({ manifest }),
+        });
+        const lines = plan.changes
+          .filter((c) => c.destructive)
+          .map((c) => `• ${c.kind} ${c.target} (${c.detail})`);
+        if (!confirm(`This deploy would destroy stored data:\n\n${lines.join('\n')}\n\nApply anyway?`)) return;
+        log(await deploy(true));
+        await refresh();
+      } catch {}
+    }
   };
 
   $('rotateWrite').onclick = async () => {

@@ -96,11 +96,12 @@ class McpTools(
 
         tool(
             "site_deploy",
-            "Deploy a site manifest (and optional static files). Creates or migrates tables.",
+            "Deploy a site manifest (and optional static files). Destructive schema changes need confirmDestructive=true.",
             schema(required = listOf("site", "manifest")) {
                 prop("site", "string")
                 prop("manifest", "string")
                 prop("files", "object")
+                prop("confirmDestructive", "boolean")
             },
         ) { args ->
             val site = service.resolveSite(args.requireString("site"))
@@ -108,10 +109,28 @@ class McpTools(
             args.optJSONObject("files")?.let { json ->
                 json.keys().forEach { path -> files[path] = json.getString(path) }
             }
-            val result = service.deploy(site.id, args.requireString("manifest"), files)
+            val result = service.deploy(
+                site.id,
+                args.requireString("manifest"),
+                files,
+                args.optBoolean("confirmDestructive", false),
+            )
             val updated = service.resolveSite(site.id)
             service.startListener(updated)
             result.put("urls", service.urls(updated))
+        },
+
+        tool(
+            "site_schema_plan",
+            "Report what deploying this manifest would change in the database, without applying it.",
+            schema(required = listOf("site", "manifest")) {
+                prop("site", "string")
+                prop("manifest", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            val manifest = dev.emwl.host.domain.Manifest.parse(args.requireString("manifest"))
+            service.database(site).schemaPlan(manifest).toJson()
         },
 
         tool(
@@ -379,11 +398,12 @@ class McpTools(
 
         tool(
             "site_revision_rollback",
-            "Serve a stored revision again. Requires confirm=true; data and uploaded files are untouched.",
+            "Serve a stored revision again. Requires confirm=true; confirmDestructive=true if it narrows the schema.",
             schema(required = listOf("site", "revision", "confirm")) {
                 prop("site", "string")
                 prop("revision", "string")
                 prop("confirm", "boolean")
+                prop("confirmDestructive", "boolean")
             },
         ) { args ->
             val site = service.resolveSite(args.requireString("site"))
@@ -391,6 +411,7 @@ class McpTools(
                 site,
                 args.requireString("revision"),
                 args.optBoolean("confirm", false),
+                args.optBoolean("confirmDestructive", false),
             )
         },
 

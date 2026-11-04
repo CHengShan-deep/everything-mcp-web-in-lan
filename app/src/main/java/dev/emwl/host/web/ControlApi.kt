@@ -193,10 +193,19 @@ fun Application.controlModule(
                         id = site.id,
                         manifestJson = body.optString("manifest"),
                         files = files,
+                        confirmDestructive = body.optBoolean("confirmDestructive", false),
                     )
                     val updated = service.resolveSite(site.id)
                     service.startListener(updated)
                     result.put("urls", service.urls(updated))
+                }
+            }
+
+            post("/sites/{ref}/schema-plan") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val manifest = Manifest.parse(body.optString("manifest"))
+                    service.database(site).schemaPlan(manifest).toJson()
                 }
             }
 
@@ -352,6 +361,7 @@ fun Application.controlModule(
                         site,
                         call.parameters["revision"].orEmpty(),
                         body.optBoolean("confirm", false),
+                        body.optBoolean("confirmDestructive", false),
                     )
                 }
             }

@@ -128,7 +128,12 @@ class SiteRevisionService(private val service: SiteService) {
      * Rolls the site back to a stored revision. The manifest pointer is only written after
      * the content swap succeeded, so a failed rollback leaves the previous content served.
      */
-    fun rollback(site: SiteRecord, revisionId: String, confirm: Boolean): JSONObject {
+    fun rollback(
+        site: SiteRecord,
+        revisionId: String,
+        confirm: Boolean,
+        confirmDestructive: Boolean = false,
+    ): JSONObject {
         if (!confirm) {
             throw DomainException("CONFIRM_REQUIRED", "rollback replaces the served content; pass confirm=true")
         }
@@ -150,6 +155,16 @@ class SiteRevisionService(private val service: SiteService) {
             }
             val manifest = Manifest.parse(String(manifestBytes, Charsets.UTF_8))
 
+            // A rollback can also narrow the schema; refuse data loss until it is confirmed.
+            val database = service.database(site)
+            val plan = database.schemaPlan(manifest)
+            if (plan.destructive.isNotEmpty() && !confirmDestructive) {
+                throw DomainException(
+                    "SCHEMA_DESTRUCTIVE",
+                    "rolling back changes stored data: ${plan.summary()}; pass confirmDestructive=true"
+                )
+            }
+
             val public = File(service.siteDirOf(site), "public")
             val staged = File(
                 public.parentFile,
@@ -160,29 +175,29 @@ class SiteRevisionService(private val service: SiteService) {
             var backup: File? = null
             try {
                 backup = FileTrees.install(staged, public)
-                val schema = service.database(site).applySchema(manifest)
-                val updated = site.copy(
-                    manifestJson = String(manifestBytes, Charsets.UTF_8),
-                    servedRevision = revisionId,
-                    updatedAt = System.currentTimeMillis(),
-                )
                 try {
+                    val schema = database.applySchema(manifest, confirmDestructive)
+                    val updated = site.copy(
+                        manifestJson = String(manifestBytes, Charsets.UTF_8),
+                        servedRevision = revisionId,
+                        updatedAt = System.currentTimeMillis(),
+                    )
                     service.repository().update(updated)
+                    backup?.deleteRecursively()
+                    backup = null
+                    service.audit("revision_rollback", updated, revisionId)
+                    JSONObject()
+                        .put("rolledBack", true)
+                        .put("revision", revisionId)
+                        .put("contentHash", entry.getString("contentHash"))
+                        .put("files", tree.size)
+                        .put("schema", schema)
+                        .put("site", service.siteJson(updated))
                 } catch (t: Throwable) {
                     FileTrees.revert(public, backup)
                     backup = null
                     throw t
                 }
-                backup?.deleteRecursively()
-                backup = null
-                service.audit("revision_rollback", updated, revisionId)
-                JSONObject()
-                    .put("rolledBack", true)
-                    .put("revision", revisionId)
-                    .put("contentHash", entry.getString("contentHash"))
-                    .put("files", tree.size)
-                    .put("schema", schema)
-                    .put("site", service.siteJson(updated))
             } finally {
                 staged.deleteRecursively()
                 backup?.deleteRecursively()

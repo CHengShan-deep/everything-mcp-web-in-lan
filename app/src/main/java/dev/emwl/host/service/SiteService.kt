@@ -177,10 +177,25 @@ class SiteService(private val context: Context) {
         return JSONObject().put("which", which).put("token", token)
     }
 
-    fun deploy(id: String, manifestJson: String, files: Map<String, String>): JSONObject {
+    fun deploy(
+        id: String,
+        manifestJson: String,
+        files: Map<String, String>,
+        confirmDestructive: Boolean = false,
+    ): JSONObject {
         val site = requireSite(id)
         val incoming = Manifest.parse(manifestJson)
         val storedManifest = manifestJson(incoming)
+
+        // Refuse data-losing migrations before any content is staged or swapped.
+        val database = database(site)
+        val plan = database.schemaPlan(incoming)
+        if (plan.destructive.isNotEmpty() && !confirmDestructive) {
+            throw DomainException(
+                "SCHEMA_DESTRUCTIVE",
+                "destructive schema changes require confirmDestructive=true: ${plan.summary()}"
+            )
+        }
 
         val public = publicDir(site)
         val staging = File(
@@ -212,34 +227,33 @@ class SiteService(private val context: Context) {
                 written += path
             }
 
-            // Capture, migrate, swap and record under the content lock so a concurrent
+            // Capture, swap, migrate and record under the content lock so a concurrent
             // deploy or rollback cannot interleave with this one.
             val result = revisions().contentLocked {
                 val captured = revisions().capture(site, storedManifest.toByteArray(Charsets.UTF_8), staging)
                 capture = captured
-                val schemaResult = database(site).applySchema(incoming)
-
                 backup = FileTrees.install(staging, public)
-                val updated = site.copy(
-                    manifestJson = storedManifest,
-                    servedRevision = captured.id,
-                    updatedAt = System.currentTimeMillis(),
-                )
                 try {
+                    val schemaResult = database.applySchema(incoming, confirmDestructive)
+                    val updated = site.copy(
+                        manifestJson = storedManifest,
+                        servedRevision = captured.id,
+                        updatedAt = System.currentTimeMillis(),
+                    )
                     repository.update(updated)
+                    backup?.deleteRecursively()
+                    backup = null
+                    audit(
+                        "site_deploy",
+                        updated,
+                        "written=${written.size} rejected=${rejected.size} revision=${captured.id}",
+                    )
+                    Triple(updated, schemaResult, captured)
                 } catch (t: Throwable) {
                     FileTrees.revert(public, backup)
                     backup = null
                     throw t
                 }
-                backup?.deleteRecursively()
-                backup = null
-                audit(
-                    "site_deploy",
-                    updated,
-                    "written=${written.size} rejected=${rejected.size} revision=${captured.id}",
-                )
-                Triple(updated, schemaResult, captured)
             }
 
             return JSONObject()
