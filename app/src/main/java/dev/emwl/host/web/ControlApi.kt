@@ -355,6 +355,19 @@ fun Application.controlModule(
                     )
                 }
             }
+
+            get("/sites/{ref}/requests") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val query = call.request.queryParameters
+                    service.database(site).listRequests(
+                        limit = (query["limit"]?.toIntOrNull() ?: 50).coerceIn(1, 500),
+                        offset = (query["offset"]?.toIntOrNull() ?: 0).coerceAtLeast(0),
+                        status = query["status"]?.takeIf { it.isNotEmpty() },
+                        path = query["path"]?.takeIf { it.isNotEmpty() },
+                    )
+                }
+            }
         }
     }
 

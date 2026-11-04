@@ -27,11 +27,13 @@ class SiteDatabase(context: Context, siteId: String) {
     private val db: SQLiteDatabase
 
     @Volatile private var maintenance = false
+    private var inserts = 0
 
     init {
         val dir = File(context.noBackupFilesDir, "sites").apply { mkdirs() }
         db = SQLiteDatabase.openOrCreateDatabase(File(dir, "$siteId.db"), null)
         db.enableWriteAheadLogging()
+        ensureRequestTable()
     }
 
     fun file(): File = File(db.path)
@@ -236,6 +238,102 @@ class SiteDatabase(context: Context, siteId: String) {
         )
     }
 
+    fun ensureRequestTable() {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _requests(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                ms INTEGER NOT NULL,
+                ip TEXT
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_requests_at ON _requests(at)")
+    }
+
+    /**
+     * Request logging is best effort: it never fails a request, and it stays out of the way
+     * while a backup has quiesced the database so a checkpoint cannot report busy.
+     */
+    fun recordRequest(method: String, path: String, status: Int, ms: Int, ip: String?) {
+        if (maintenance) return
+        try {
+            db.execSQL(
+                "INSERT INTO _requests(at, method, path, status, ms, ip) VALUES (?, ?, ?, ?, ?, ?)",
+                arrayOf(System.currentTimeMillis(), method, path.take(MAX_PATH_CHARS), status, ms, ip),
+            )
+            inserts += 1
+            if (inserts % TRIM_EVERY == 0) {
+                db.execSQL("DELETE FROM _requests WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM _requests) - $MAX_REQUESTS")
+            }
+        } catch (_: Throwable) {
+            // A failed log line must never turn into a failed request.
+        }
+    }
+
+    fun listRequests(limit: Int, offset: Int, status: String?, path: String?): JSONObject {
+        val where = ArrayList<String>()
+        val args = ArrayList<String>()
+
+        status?.takeIf { it.isNotEmpty() }?.let { filter ->
+            when {
+                filter.matches(STATUS_CODE) -> {
+                    where += "status = ?"
+                    args += filter
+                }
+                filter.matches(STATUS_CLASS) -> {
+                    val hundred = filter.first().digitToInt() * 100
+                    where += "status BETWEEN ? AND ?"
+                    args += hundred.toString()
+                    args += (hundred + 99).toString()
+                }
+                else -> throw DomainException("INVALID_ARGUMENT", "status must be a code like 404 or a class like 4xx")
+            }
+        }
+        path?.takeIf { it.isNotEmpty() }?.let { filter ->
+            where += "path LIKE ? ESCAPE '\\'"
+            args += "%${QueryFilters.escapeLike(filter)}%"
+        }
+
+        val clause = if (where.isEmpty()) "" else " WHERE ${where.joinToString(" AND ")}"
+        val items = JSONArray()
+        db.rawQuery(
+            "SELECT * FROM _requests$clause ORDER BY id DESC LIMIT ? OFFSET ?",
+            (args + limit.toString() + offset.toString()).toTypedArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                items.put(
+                    JSONObject()
+                        .put("id", cursor.getLong(cursor.getColumnIndexOrThrow("id")))
+                        .put("at", cursor.getLong(cursor.getColumnIndexOrThrow("at")))
+                        .put("method", cursor.getString(cursor.getColumnIndexOrThrow("method")))
+                        .put("path", cursor.getString(cursor.getColumnIndexOrThrow("path")))
+                        .put("status", cursor.getInt(cursor.getColumnIndexOrThrow("status")))
+                        .put("ms", cursor.getInt(cursor.getColumnIndexOrThrow("ms")))
+                        .put(
+                            "ip",
+                            cursor.getColumnIndexOrThrow("ip").let { index ->
+                                if (cursor.isNull(index)) JSONObject.NULL else cursor.getString(index)
+                            }
+                        )
+                )
+            }
+        }
+
+        val total = db.rawQuery("SELECT COUNT(*) FROM _requests$clause", args.toTypedArray()).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+
+        return JSONObject()
+            .put("items", items)
+            .put("total", total)
+            .put("retained", MAX_REQUESTS)
+    }
+
     private fun encodeRow(table: TableDef, values: JSONObject, isInsert: Boolean, now: Long): Map<String, Any?> {
         val fields = table.fields.associateBy { it.name }
         val encoded = LinkedHashMap<String, Any?>()
@@ -378,4 +476,12 @@ class SiteDatabase(context: Context, siteId: String) {
                 }
             }
         }
+
+    companion object {
+        const val MAX_REQUESTS = 1000
+        const val TRIM_EVERY = 64
+        const val MAX_PATH_CHARS = 512
+        private val STATUS_CODE = Regex("^[0-9]{3}$")
+        private val STATUS_CLASS = Regex("^[1-5]xx$")
+    }
 }

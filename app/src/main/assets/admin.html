@@ -81,6 +81,13 @@
   </div>
   <ul id="revisions"></ul>
 
+  <h3>Requests</h3>
+  <div class="row">
+    <span id="requestSummary" class="muted"></span>
+    <button id="requestRefresh">Refresh</button>
+  </div>
+  <ul id="requests"></ul>
+
   <h3>Deploy manifest</h3>
   <textarea id="manifest" spellcheck="false"></textarea>
   <div class="row">
@@ -207,7 +214,24 @@
     await refreshFiles().catch(() => {});
     await refreshBackups().catch(() => {});
     await refreshRevisions().catch(() => {});
+    await refreshRequests().catch(() => {});
   }
+
+  async function refreshRequests() {
+    if (!current) return;
+    const data = await api(`/admin/api/sites/${current.ref}/requests?limit=30`);
+    $('requestSummary').textContent = `${data.total} logged · keeping the last ${data.retained}`;
+    const list = $('requests');
+    list.innerHTML = '';
+    for (const r of data.items) {
+      const li = document.createElement('li');
+      const when = new Date(r.at).toLocaleTimeString();
+      li.textContent = `${when} · ${r.method} ${r.path} · ${r.status} · ${r.ms} ms · ${r.ip ?? '-'}`;
+      list.appendChild(li);
+    }
+  }
+
+  $('requestRefresh').onclick = () => refreshRequests().catch(() => {});
 
   async function refreshRevisions() {
     if (!current) return;

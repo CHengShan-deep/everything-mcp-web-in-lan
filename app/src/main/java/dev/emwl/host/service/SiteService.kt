@@ -89,6 +89,11 @@ class SiteService(private val context: Context) {
         stopListenerFor(id)
         databases.remove(id)?.close()
         fileIndexes.remove(id)
+        val databaseFile = databaseFileOf(site)
+        listOf("-wal", "-shm", "-journal").forEach { suffix ->
+            File("${databaseFile.path}$suffix").delete()
+        }
+        databaseFile.delete()
         publicDir(site).parentFile?.deleteRecursively()
         val deleted = repository.delete(id)
         if (deleted) audit("site_delete", site, null)

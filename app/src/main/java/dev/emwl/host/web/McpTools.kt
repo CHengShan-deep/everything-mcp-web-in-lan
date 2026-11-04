@@ -393,6 +393,26 @@ class McpTools(
                 args.optBoolean("confirm", false),
             )
         },
+
+        tool(
+            "site_requests_get",
+            "Recent requests served by one site, newest first. status accepts a code (404) or a class (4xx).",
+            schema(required = listOf("site")) {
+                prop("site", "string")
+                prop("limit", "integer")
+                prop("offset", "integer")
+                prop("status", "string")
+                prop("path", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.database(site).listRequests(
+                limit = args.optInt("limit", 50).coerceIn(1, 500),
+                offset = args.optInt("offset", 0).coerceAtLeast(0),
+                status = args.optString("status").takeIf { it.isNotEmpty() },
+                path = args.optString("path").takeIf { it.isNotEmpty() },
+            )
+        },
     )
 
     private val byName = tools.associateBy { it.name }

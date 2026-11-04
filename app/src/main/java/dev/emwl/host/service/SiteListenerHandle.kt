@@ -13,10 +13,14 @@ import io.ktor.http.content.PartData
 import io.ktor.utils.io.toByteArray
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.origin
+import io.ktor.server.request.httpMethod
+import io.ktor.server.request.path
 import io.ktor.server.request.receiveMultipart
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
@@ -59,6 +63,30 @@ class SiteListenerHandle private constructor(
  * redeploys take effect without waiting for a listener restart.
  */
 private fun Application.siteModule(context: Context, siteId: String, service: SiteService) {
+    intercept(ApplicationCallPipeline.Monitoring) {
+        val started = System.nanoTime()
+        try {
+            proceed()
+        } finally {
+            val path = call.request.path()
+            if (path != "/health") {
+                val status = call.response.status()?.value ?: HttpStatusCode.InternalServerError.value
+                val elapsedMs = ((System.nanoTime() - started) / 1_000_000).toInt()
+                runCatching {
+                    service.getSite(siteId)?.let { site ->
+                        service.database(site).recordRequest(
+                            method = call.request.httpMethod.value,
+                            path = path,
+                            status = status,
+                            ms = elapsedMs,
+                            ip = call.request.origin.remoteHost,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     routing {
         get("/health") {
             val site = service.getSite(siteId)
