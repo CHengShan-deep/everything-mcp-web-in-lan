@@ -67,6 +67,8 @@ class SiteFileIndex(private val db: SiteDatabase) {
     fun delete(id: String): Boolean =
         db.writableDb().delete("_files", "id = ?", arrayOf(id)) == 1
 
+    fun isMaintenance(): Boolean = db.isMaintenanceMode()
+
     fun usedBytes(): Long =
         db.writableDb().rawQuery("SELECT COALESCE(SUM(size), 0) FROM _files", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L

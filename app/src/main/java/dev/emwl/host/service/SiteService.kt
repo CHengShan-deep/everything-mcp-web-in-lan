@@ -196,7 +196,7 @@ class SiteService(private val context: Context) {
 
         val schemaResult = database(site).applySchema(incoming)
 
-        val storedManifest = toJson(incoming)
+        val storedManifest = manifestJson(incoming)
         val updated = site.copy(
             manifestJson = storedManifest,
             updatedAt = System.currentTimeMillis(),
@@ -288,7 +288,7 @@ class SiteService(private val context: Context) {
         runCatching { repository.close() }
     }
 
-    private fun toJson(manifest: Manifest): String = JSONObject()
+    fun manifestJson(manifest: Manifest): String = JSONObject()
         .put("schemaVersion", manifest.schemaVersion)
         .put("slug", manifest.slug)
         .put("name", manifest.name)
@@ -339,4 +339,22 @@ class SiteService(private val context: Context) {
             }
         )
         .toString()
+
+    fun closeDatabase(id: String) {
+        databases.remove(id)?.close()
+        fileIndexes.remove(id)
+    }
+
+    fun stopListenerFor(id: String) {
+        listeners.remove(id)?.stop()
+    }
+
+    fun siteDirOf(site: SiteRecord): File =
+        File(context.noBackupFilesDir, "sites/${site.id}")
+
+    fun databaseFileOf(site: SiteRecord): File =
+        File(File(context.noBackupFilesDir, "sites"), "${site.id}.db")
+
+    fun backups(): SiteBackupService = SiteBackupService(context, this)
 }
+

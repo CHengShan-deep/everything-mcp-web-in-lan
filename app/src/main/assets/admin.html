@@ -68,6 +68,13 @@
   </div>
   <ul id="files"></ul>
 
+  <h3>Backups</h3>
+  <div class="row">
+    <button id="backupCreate">Create backup</button>
+    <span id="backupUsage" class="muted"></span>
+  </div>
+  <ul id="backups"></ul>
+
   <h3>Deploy manifest</h3>
   <textarea id="manifest" spellcheck="false"></textarea>
   <div class="row">
@@ -192,7 +199,44 @@
       $('manifest').value = JSON.stringify(data.manifest, null, 2);
     }
     await refreshFiles().catch(() => {});
+    await refreshBackups().catch(() => {});
   }
+
+  async function refreshBackups() {
+    if (!current) return;
+    const data = await api(`/admin/api/sites/${current.ref}/backups`);
+    $('backupUsage').textContent = `${data.items.length} backup(s)`;
+    const list = $('backups');
+    list.innerHTML = '';
+    for (const b of data.items) {
+      const li = document.createElement('li');
+      const when = new Date(b.createdAt).toLocaleString();
+      li.textContent = `${b.id} · ${when} · ${b.bytes} bytes `;
+      const restore = document.createElement('button');
+      restore.textContent = 'restore';
+      restore.onclick = async () => {
+        if (!confirm(`Restore ${b.id}? Live data, files and manifest will be replaced.`)) return;
+        try {
+          log(await api(`/admin/api/sites/${current.ref}/backups/${b.id}/restore`, {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true }),
+          }));
+          await showDetail(current.ref);
+        } catch {}
+      };
+      li.appendChild(restore);
+      list.appendChild(li);
+    }
+  }
+
+  $('backupCreate').onclick = async () => {
+    if (!current) return;
+    try {
+      log(await api(`/admin/api/sites/${current.ref}/backups`, { method: 'POST', body: '{}' }));
+      await refreshBackups();
+      await refreshAudit();
+    } catch {}
+  };
 
   async function refreshFiles() {
     if (!current) return;

@@ -325,6 +325,41 @@ class McpTools(
             if (!deleted) throw DomainException("NOT_FOUND", "file not found")
             JSONObject().put("deleted", true)
         },
+
+        tool(
+            "site_backup_create",
+            "Create a backup archive (manifest, public files, uploads, WAL-safe database snapshot).",
+            schema(required = listOf("site")) { prop("site", "string") },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.backups().create(site)
+        },
+
+        tool(
+            "site_backups_list",
+            "List backup archives for a site.",
+            schema(required = listOf("site")) { prop("site", "string") },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            JSONObject().put("items", service.backups().list(site))
+        },
+
+        tool(
+            "site_backup_restore",
+            "Restore a backup over the live site. Requires confirm=true; replaces data, files and manifest.",
+            schema(required = listOf("site", "backup", "confirm")) {
+                prop("site", "string")
+                prop("backup", "string")
+                prop("confirm", "boolean")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.backups().restore(
+                site,
+                args.requireString("backup"),
+                args.optBoolean("confirm", false),
+            )
+        },
     )
 
     private val byName = tools.associateBy { it.name }

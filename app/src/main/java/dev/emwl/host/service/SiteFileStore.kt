@@ -25,6 +25,7 @@ class SiteFileStore(
     fun fileOf(id: String): File = File(dir(), id)
 
     fun save(originalName: String, bytes: ByteArray, policy: FilePolicy): FileRecord {
+        if (index.isMaintenance()) throw DomainException("MAINTENANCE", "site is being backed up; retry shortly")
         val safeName = sanitizeName(originalName)
         if (bytes.size > policy.maxBytes) {
             throw DomainException("FILE_TOO_LARGE", "file exceeds ${policy.maxBytes} bytes")

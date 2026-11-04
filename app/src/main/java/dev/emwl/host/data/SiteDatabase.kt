@@ -26,10 +26,74 @@ class SiteDatabase(context: Context, siteId: String) {
 
     private val db: SQLiteDatabase
 
+    @Volatile private var maintenance = false
+
     init {
         val dir = File(context.noBackupFilesDir, "sites").apply { mkdirs() }
         db = SQLiteDatabase.openOrCreateDatabase(File(dir, "$siteId.db"), null)
         db.enableWriteAheadLogging()
+    }
+
+    fun file(): File = File(db.path)
+
+    fun isMaintenance(): Boolean = maintenance
+
+    private fun requireWritable() {
+        if (maintenance) {
+            throw DomainException("MAINTENANCE", "site is being backed up; retry shortly")
+        }
+    }
+
+    /**
+     * WAL-safe snapshot for backups. `VACUUM INTO` is used when the engine supports it;
+     * otherwise writes are quiesced, the WAL is truncated, and the main file is copied.
+     * A checkpoint that reports busy is treated as failure, never as success.
+     */
+    fun snapshotTo(target: File): JSONObject {
+        target.parentFile?.mkdirs()
+        target.delete()
+        val result = JSONObject()
+
+        try {
+            db.execSQL("VACUUM INTO '${target.absolutePath.replace("'", "''")}'")
+            result.put("method", "vacuum_into")
+        } catch (t: Throwable) {
+            result.put("vacuumIntoError", t.message ?: t.javaClass.simpleName)
+            synchronized(this) {
+                maintenance = true
+                try {
+                    db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val busy = cursor.getInt(0)
+                            result.put("checkpointBusy", busy)
+                            result.put("checkpointFrames", cursor.getInt(1))
+                            result.put("checkpointDone", cursor.getInt(2))
+                            if (busy != 0) {
+                                throw DomainException("BACKUP_BUSY", "WAL checkpoint did not complete")
+                            }
+                        }
+                    }
+                    File(db.path).copyTo(target, overwrite = true)
+                } finally {
+                    maintenance = false
+                }
+            }
+            result.put("method", "quiesce_copy")
+        }
+
+        try {
+            SQLiteDatabase.openDatabase(target.path, null, SQLiteDatabase.OPEN_READONLY).use { copy ->
+                val quick = copy.rawQuery("PRAGMA quick_check", null).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else "no-result"
+                }
+                result.put("quickCheck", quick)
+                result.put("verified", quick.equals("ok", ignoreCase = true))
+            }
+        } catch (t: Throwable) {
+            result.put("verified", false)
+            result.put("verifyError", t.message ?: t.javaClass.simpleName)
+        }
+        return result
     }
 
     fun applySchema(manifest: Manifest): JSONObject {
@@ -118,6 +182,7 @@ class SiteDatabase(context: Context, siteId: String) {
         }
 
     fun insert(table: TableDef, values: JSONObject, now: Long = System.currentTimeMillis()): Long {
+        requireWritable()
         val row = encodeRow(table, values, isInsert = true, now = now)
         if (table.fields.any { it.required && it.name !in row }) {
             val missing = table.fields.filter { it.required && it.name !in row }.map { it.name }
@@ -131,6 +196,7 @@ class SiteDatabase(context: Context, siteId: String) {
     }
 
     fun update(table: TableDef, id: Long, values: JSONObject, now: Long = System.currentTimeMillis()): Int {
+        requireWritable()
         val row = encodeRow(table, values, isInsert = false, now = now)
         if (row.isEmpty()) {
             throw DomainException("INVALID_VALUE", "no writable fields in request body")
@@ -142,8 +208,12 @@ class SiteDatabase(context: Context, siteId: String) {
         }
     }
 
-    fun delete(table: TableDef, id: Long): Int =
-        db.delete(table.name, "id = ?", arrayOf(id.toString()))
+    fun delete(table: TableDef, id: Long): Int {
+        requireWritable()
+        return db.delete(table.name, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun isMaintenanceMode(): Boolean = maintenance
 
     fun close() {
         runCatching { db.close() }

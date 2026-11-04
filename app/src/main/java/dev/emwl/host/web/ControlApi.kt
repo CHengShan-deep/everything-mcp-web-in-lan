@@ -311,6 +311,31 @@ fun Application.controlModule(
                     JSONObject().put("deleted", id)
                 }
             }
+
+            get("/sites/{ref}/backups") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    JSONObject().put("items", service.backups().list(site))
+                }
+            }
+
+            post("/sites/{ref}/backups") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    service.backups().create(site)
+                }
+            }
+
+            post("/sites/{ref}/backups/{backup}/restore") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    service.backups().restore(
+                        site,
+                        call.parameters["backup"].orEmpty(),
+                        body.optBoolean("confirm", false),
+                    )
+                }
+            }
         }
     }
 
