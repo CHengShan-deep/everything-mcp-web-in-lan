@@ -9,13 +9,18 @@ import dev.emwl.host.domain.QueryFilters.Filter
 import dev.emwl.host.domain.Tokens
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.PartData
+import io.ktor.utils.io.toByteArray
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.request.receiveMultipart
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
@@ -72,6 +77,13 @@ private fun Application.siteModule(context: Context, siteId: String, service: Si
             delete("/{table}/{id}") { call.withSiteErrors { dataDelete(call, siteId, service) } }
         }
 
+        route("/api/files") {
+            get { call.withSiteErrors { fileList(call, siteId, service) } }
+            post { call.withSiteErrors { fileUpload(call, siteId, service) } }
+            get("/{id}") { call.withSiteErrors { fileDownload(call, siteId, service) } }
+            delete("/{id}") { call.withSiteErrors { fileDelete(call, siteId, service) } }
+        }
+
         get("/{path...}") {
             respondStatic(call, context, siteId, service)
         }
@@ -122,6 +134,7 @@ private suspend fun dataInsert(call: ApplicationCall, siteId: String, service: S
     val site = siteOf(siteId, service)
     val table = manifestOf(site, service).table(call.parameters["table"] ?: "")
     authorize(call, site, write = true)
+    requireWriteBudget(site, service)
     val body = JSONObject(call.receiveText())
     val id = service.database(site).insert(table, body)
     call.respondJson(JSONObject().put("id", id), HttpStatusCode.Created)
@@ -131,6 +144,7 @@ private suspend fun dataUpdate(call: ApplicationCall, siteId: String, service: S
     val site = siteOf(siteId, service)
     val table = manifestOf(site, service).table(call.parameters["table"] ?: "")
     authorize(call, site, write = true)
+    requireWriteBudget(site, service)
     val id = call.parameters["id"]?.toLongOrNull()
         ?: throw DomainException("INVALID_ARGUMENT", "id must be a number")
     val updated = service.database(site).update(table, id, JSONObject(call.receiveText()))
@@ -142,6 +156,7 @@ private suspend fun dataDelete(call: ApplicationCall, siteId: String, service: S
     val site = siteOf(siteId, service)
     val table = manifestOf(site, service).table(call.parameters["table"] ?: "")
     authorize(call, site, write = true)
+    requireWriteBudget(site, service)
     val id = call.parameters["id"]?.toLongOrNull()
         ?: throw DomainException("INVALID_ARGUMENT", "id must be a number")
     val deleted = service.database(site).delete(table, id)
@@ -240,6 +255,8 @@ private suspend fun ApplicationCall.withSiteErrors(block: suspend () -> Unit) {
         val status = when (t.code) {
             "SITE_NOT_FOUND", "TABLE_NOT_FOUND", "NOT_FOUND" -> HttpStatusCode.NotFound
             "AUTH_REQUIRED" -> HttpStatusCode.Unauthorized
+            "RATE_LIMITED" -> HttpStatusCode.TooManyRequests
+            "FILE_TOO_LARGE", "QUOTA_EXCEEDED" -> HttpStatusCode.PayloadTooLarge
             "CONFLICT" -> HttpStatusCode.Conflict
             else -> HttpStatusCode.BadRequest
         }
@@ -262,3 +279,131 @@ private suspend fun ApplicationCall.withSiteErrors(block: suspend () -> Unit) {
 }
 
 private val SET_QUERY_KEYS = setOf("limit", "offset", "order", "count", "isnull")
+
+private suspend fun fileList(call: ApplicationCall, siteId: String, service: SiteService) {
+    val site = siteOf(siteId, service)
+    authorize(call, site, write = false)
+    val store = service.fileStore(site)
+    call.respondJson(
+        JSONObject()
+            .put("items", store.index.list())
+            .put("usedBytes", store.usedBytes())
+    )
+}
+
+private suspend fun fileUpload(call: ApplicationCall, siteId: String, service: SiteService) {
+    val site = siteOf(siteId, service)
+    val manifest = manifestOf(site, service)
+    authorize(call, site, write = true)
+    requireWriteBudget(site, service)
+    val store = service.fileStore(site)
+
+    var record: dev.emwl.host.data.FileRecord? = null
+    var failure: DomainException? = null
+
+    val multipart = call.receiveMultipart()
+    while (true) {
+        val part = multipart.readPart() ?: break
+        try {
+            if (part is PartData.FileItem && record == null && failure == null) {
+                val name = part.originalFileName ?: "upload.bin"
+                val bytes = part.provider().toByteArray()
+                try {
+                    record = store.save(name, bytes, manifest.files)
+                } catch (t: DomainException) {
+                    failure = t
+                }
+            }
+        } finally {
+            part.dispose()
+        }
+    }
+
+    failure?.let { throw it }
+    val saved = record ?: throw DomainException("INVALID_ARGUMENT", "multipart body had no file part")
+    service.audit("file_upload", site, saved.name)
+    call.respondJson(
+        JSONObject()
+            .put("id", saved.id)
+            .put("name", saved.name)
+            .put("mime", saved.mime)
+            .put("size", saved.size)
+            .put("sha256", saved.sha256),
+        HttpStatusCode.Created
+    )
+}
+
+private suspend fun fileDownload(call: ApplicationCall, siteId: String, service: SiteService) {
+    val site = siteOf(siteId, service)
+    authorize(call, site, write = false)
+    val id = call.parameters["id"].orEmpty()
+    val (record, bytes) = service.fileStore(site).read(id)
+        ?: throw DomainException("NOT_FOUND", "file not found")
+
+    val etag = "\"${record.sha256}\""
+    call.response.headers.append("ETag", etag)
+    call.response.headers.append("Accept-Ranges", "bytes")
+    call.response.headers.append(
+        "Content-Disposition",
+        "attachment; filename=\"${record.name.replace("\"", "")}\""
+    )
+    if (call.request.headers["If-None-Match"] == etag) {
+        call.respond(HttpStatusCode.NotModified)
+        return
+    }
+
+    val contentType = ContentType.parse(record.mime)
+    val range = call.request.headers["Range"]
+    if (range == null) {
+        call.respondBytes(bytes, contentType, HttpStatusCode.OK)
+        return
+    }
+
+    val parsed = parseRange(range, bytes.size.toLong())
+    if (parsed == null) {
+        call.response.headers.append("Content-Range", "bytes */${bytes.size}")
+        call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
+        return
+    }
+    val (start, end) = parsed
+    val slice = bytes.copyOfRange(start.toInt(), (end + 1).toInt())
+    call.response.headers.append("Content-Range", "bytes $start-$end/${bytes.size}")
+    call.respondBytes(slice, contentType, HttpStatusCode.PartialContent)
+}
+
+private suspend fun fileDelete(call: ApplicationCall, siteId: String, service: SiteService) {
+    val site = siteOf(siteId, service)
+    authorize(call, site, write = true)
+    requireWriteBudget(site, service)
+    val id = call.parameters["id"].orEmpty()
+    if (!service.fileStore(site).delete(id)) {
+        throw DomainException("NOT_FOUND", "file not found")
+    }
+    service.audit("file_delete", site, id)
+    call.respondJson(JSONObject().put("deleted", id))
+}
+
+private fun parseRange(header: String, size: Long): Pair<Long, Long>? {
+    if (!header.startsWith("bytes=")) return null
+    val spec = header.removePrefix("bytes=").substringBefore(',')
+    val startText = spec.substringBefore('-')
+    val endText = spec.substringAfter('-', "")
+    if (startText.isEmpty()) {
+        val suffix = endText.toLongOrNull() ?: return null
+        if (suffix <= 0) return null
+        val start = (size - suffix).coerceAtLeast(0)
+        return start to (size - 1)
+    }
+    val start = startText.toLongOrNull() ?: return null
+    if (start >= size) return null
+    val end = if (endText.isEmpty()) size - 1 else (endText.toLongOrNull() ?: return null).coerceAtMost(size - 1)
+    if (end < start) return null
+    return start to end
+}
+
+private fun requireWriteBudget(site: SiteRecord, service: SiteService) {
+    if (!service.limiter.allow(site.id)) {
+        val retry = service.limiter.retryAfter(site.id)
+        throw DomainException("RATE_LIMITED", "write rate limit reached; retry in ${retry}s")
+    }
+}

@@ -33,6 +33,7 @@ class SiteDatabase(context: Context, siteId: String) {
     }
 
     fun applySchema(manifest: Manifest): JSONObject {
+        ensureFileTable()
         val created = JSONArray()
         val altered = JSONArray()
         val indexes = JSONArray()
@@ -148,6 +149,23 @@ class SiteDatabase(context: Context, siteId: String) {
         runCatching { db.close() }
     }
 
+    fun writableDb(): SQLiteDatabase = db
+
+    fun ensureFileTable() {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS _files(
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+    }
+
     private fun encodeRow(table: TableDef, values: JSONObject, isInsert: Boolean, now: Long): Map<String, Any?> {
         val fields = table.fields.associateBy { it.name }
         val encoded = LinkedHashMap<String, Any?>()
@@ -183,13 +201,26 @@ class SiteDatabase(context: Context, siteId: String) {
                 }
                 text
             }
-            FieldType.INT -> (raw as? Number)?.toLong()
-                ?: throw DomainException("INVALID_VALUE", "${field.name} must be an integer")
-            FieldType.REAL -> (raw as? Number)?.toDouble()
-                ?: throw DomainException("INVALID_VALUE", "${field.name} must be a number")
+            FieldType.INT -> when (raw) {
+                is Number -> raw.toLong()
+                is String -> raw.toLongOrNull()
+                    ?: throw DomainException("INVALID_VALUE", "${field.name} must be an integer")
+                else -> throw DomainException("INVALID_VALUE", "${field.name} must be an integer")
+            }
+            FieldType.REAL -> when (raw) {
+                is Number -> raw.toDouble()
+                is String -> raw.toDoubleOrNull()
+                    ?: throw DomainException("INVALID_VALUE", "${field.name} must be a number")
+                else -> throw DomainException("INVALID_VALUE", "${field.name} must be a number")
+            }
             FieldType.BOOLEAN -> when (raw) {
                 is Boolean -> if (raw) 1L else 0L
                 is Number -> if (raw.toInt() != 0) 1L else 0L
+                is String -> when (raw.lowercase()) {
+                    "true", "1" -> 1L
+                    "false", "0" -> 0L
+                    else -> throw DomainException("INVALID_VALUE", "${field.name} must be a boolean")
+                }
                 else -> throw DomainException("INVALID_VALUE", "${field.name} must be a boolean")
             }
             FieldType.DATETIME -> when (raw) {

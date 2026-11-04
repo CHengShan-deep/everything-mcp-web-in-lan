@@ -2,6 +2,7 @@ package dev.emwl.host.service
 
 import android.content.Context
 import dev.emwl.host.data.SiteDatabase
+import dev.emwl.host.data.SiteFileIndex
 import dev.emwl.host.data.SiteRecord
 import dev.emwl.host.data.SiteRepository
 import dev.emwl.host.domain.AuthPolicy
@@ -21,6 +22,7 @@ class SiteService(private val context: Context) {
 
     private val repository = SiteRepository(context)
     private val databases = ConcurrentHashMap<String, SiteDatabase>()
+    private val fileIndexes = ConcurrentHashMap<String, SiteFileIndex>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listeners = ConcurrentHashMap<String, SiteListenerHandle>()
 
@@ -42,6 +44,9 @@ class SiteService(private val context: Context) {
 
     fun database(site: SiteRecord): SiteDatabase =
         databases.getOrPut(site.id) { SiteDatabase(context, site.id) }
+
+    fun fileStore(site: SiteRecord): SiteFileStore =
+        SiteFileStore(context, site, fileIndexes.getOrPut(site.id) { SiteFileIndex(database(site)) })
 
     fun publicDir(site: SiteRecord): File =
         File(File(context.noBackupFilesDir, "sites/${site.id}"), "public").apply { mkdirs() }
@@ -70,6 +75,7 @@ class SiteService(private val context: Context) {
             updatedAt = now,
         )
         repository.insert(record)
+        audit("site_create", record, "port=${record.port}")
         return JSONObject()
             .put("site", siteJson(record))
             .put("writeToken", writeToken)
@@ -79,14 +85,18 @@ class SiteService(private val context: Context) {
         val site = repository.find(id) ?: return false
         listeners.remove(id)?.stop()
         databases.remove(id)?.close()
+        fileIndexes.remove(id)
         publicDir(site).parentFile?.deleteRecursively()
-        return repository.delete(id)
+        val deleted = repository.delete(id)
+        if (deleted) audit("site_delete", site, null)
+        return deleted
     }
 
     fun renameSite(id: String, name: String): SiteRecord {
         val site = requireSite(id)
         val updated = site.copy(name = name, updatedAt = System.currentTimeMillis())
         repository.update(updated)
+        audit("site_rename", updated, name)
         return updated
     }
 
@@ -98,12 +108,30 @@ class SiteService(private val context: Context) {
         )
         repository.update(updated)
         restartListener(updated)
+        audit("exposure_change", updated, updated.exposure)
         return updated
     }
 
-    fun setAuth(id: String, read: String?, write: String?): JSONObject {
+    /**
+     * Public writes are a deliberate downgrade: without an explicit confirmation the
+     * change is refused so a site cannot drift into anonymous-writable by accident.
+     */
+    fun setAuth(
+        id: String,
+        read: String?,
+        write: String?,
+        confirmPublicWrite: Boolean = false,
+    ): JSONObject {
         val site = requireSite(id)
         val policy = AuthPolicy.from(read ?: site.authRead, write ?: site.authWrite)
+
+        val movingToPublicWrite = policy.write == "none" && site.authWrite != "none"
+        if (movingToPublicWrite && !confirmPublicWrite) {
+            throw DomainException(
+                "PUBLIC_WRITE_CONFIRMATION_REQUIRED",
+                "setting write auth to none makes the site publicly writable; pass confirmPublicWrite=true"
+            )
+        }
 
         var readToken: String? = null
         var readHash = site.readTokenHash
@@ -121,8 +149,10 @@ class SiteService(private val context: Context) {
             updatedAt = System.currentTimeMillis(),
         )
         repository.update(updated)
+        audit("auth_change", updated, "read=${updated.authRead} write=${updated.authWrite}")
         val result = JSONObject().put("site", siteJson(updated))
         readToken?.let { result.put("readToken", it) }
+        if (movingToPublicWrite) result.put("publicWrite", true)
         return result
     }
 
@@ -135,6 +165,7 @@ class SiteService(private val context: Context) {
             else -> throw DomainException("INVALID_ARGUMENT", "which must be read or write")
         }.let { it.copy(updatedAt = System.currentTimeMillis()) }
         repository.update(updated)
+        audit("token_rotate", updated, which)
         return JSONObject().put("which", which).put("token", token)
     }
 
@@ -171,6 +202,7 @@ class SiteService(private val context: Context) {
             updatedAt = System.currentTimeMillis(),
         )
         repository.update(updated)
+        audit("site_deploy", updated, "written=${written.size} rejected=${rejected.size}")
 
         return JSONObject()
             .put("site", siteJson(updated))
@@ -178,6 +210,15 @@ class SiteService(private val context: Context) {
             .put("rejectedFiles", rejected)
             .put("schema", schemaResult)
     }
+
+    val limiter = dev.emwl.host.domain.WriteLimiter()
+
+    fun audit(action: String, site: SiteRecord?, detail: String?, actor: String = "local") {
+        runCatching { repository.recordAudit(actor, action, site?.slug, detail) }
+    }
+
+    fun auditLog(siteSlug: String?, limit: Int = 50): org.json.JSONArray =
+        org.json.JSONArray(repository.listAudit(siteSlug, limit))
 
     fun urls(site: SiteRecord, lanIp: String? = dev.emwl.host.Metrics.lanIpv4()): JSONObject {
         val local = "http://127.0.0.1:${site.port}"
@@ -256,6 +297,12 @@ class SiteService(private val context: Context) {
         .put(
             "auth",
             JSONObject().put("read", manifest.auth.read).put("write", manifest.auth.write)
+        )
+        .put(
+            "files",
+            JSONObject()
+                .put("maxBytes", manifest.files.maxBytes)
+                .put("allow", org.json.JSONArray(manifest.files.allow))
         )
         .put(
             "tables",

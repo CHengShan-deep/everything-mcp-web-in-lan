@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONObject
 
 data class SiteRecord(
     val id: String,
@@ -62,6 +63,7 @@ class SiteRepository(context: Context) :
             )
             """.trimIndent()
         )
+        createAuditTable(db)
     }
 
     /** Directed migrations: each version step is applied in order, never assumed. */
@@ -69,12 +71,62 @@ class SiteRepository(context: Context) :
         var version = oldVersion
         while (version < newVersion) {
             when (version) {
-                1 -> Unit
+                1 -> createAuditTable(db)
                 else -> error("no migration from version $version")
             }
             version++
         }
     }
+
+    private fun createAuditTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS audit(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at INTEGER NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                site TEXT,
+                detail TEXT
+            )
+            """.trimIndent()
+        )
+    }
+
+    fun recordAudit(actor: String, action: String, site: String?, detail: String?) {
+        writableDatabase.insertOrThrow(
+            "audit",
+            null,
+            ContentValues().apply {
+                put("at", System.currentTimeMillis())
+                put("actor", actor)
+                put("action", action)
+                put("site", site)
+                put("detail", detail)
+            }
+        )
+    }
+
+    fun listAudit(site: String?, limit: Int = 50): List<JSONObject> =
+        readableDatabase.rawQuery(
+            if (site == null) "SELECT * FROM audit ORDER BY id DESC LIMIT ?"
+            else "SELECT * FROM audit WHERE site = ? ORDER BY id DESC LIMIT ?",
+            if (site == null) arrayOf(limit.toString()) else arrayOf(site, limit.toString()),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        JSONObject()
+                            .put("id", cursor.getLong(cursor.getColumnIndexOrThrow("id")))
+                            .put("at", cursor.getLong(cursor.getColumnIndexOrThrow("at")))
+                            .put("actor", cursor.getString(cursor.getColumnIndexOrThrow("actor")))
+                            .put("action", cursor.getString(cursor.getColumnIndexOrThrow("action")))
+                            .put("site", cursor.getStringOrNull("site") ?: JSONObject.NULL)
+                            .put("detail", cursor.getStringOrNull("detail") ?: JSONObject.NULL)
+                    )
+                }
+            }
+        }
 
     fun list(): List<SiteRecord> =
         readableDatabase.rawQuery("SELECT * FROM sites ORDER BY created_at", null).use { cursor ->
@@ -196,7 +248,7 @@ class SiteRepository(context: Context) :
 
     companion object {
         const val DATABASE_NAME = "registry.db"
-        const val VERSION = 1
+        const val VERSION = 2
         const val PORT_BASE = 47200
         const val PORTS = 32
         const val COOLDOWN_MS = 7L * 24 * 60 * 60 * 1000

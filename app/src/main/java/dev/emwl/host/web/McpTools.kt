@@ -200,11 +200,12 @@ class McpTools(
 
         tool(
             "site_auth_set",
-            "Change read/write auth. Switching write to none makes the site publicly writable.",
+            "Change read/write auth. Making writes public requires confirmPublicWrite=true.",
             schema(required = listOf("site")) {
                 prop("site", "string")
                 prop("read", "string")
                 prop("write", "string")
+                prop("confirmPublicWrite", "boolean")
             },
         ) { args ->
             val site = service.resolveSite(args.requireString("site"))
@@ -212,7 +213,21 @@ class McpTools(
                 site.id,
                 args.optString("read").takeIf { it.isNotEmpty() },
                 args.optString("write").takeIf { it.isNotEmpty() },
+                confirmPublicWrite = args.optBoolean("confirmPublicWrite", false),
             )
+        },
+
+        tool(
+            "site_logs_get",
+            "Recent audit events for one site (or the whole host when site is omitted).",
+            schema {
+                prop("site", "string")
+                prop("limit", "integer")
+            },
+        ) { args ->
+            val site = args.optString("site").takeIf { it.isNotEmpty() }
+                ?.let { service.resolveSite(it).slug }
+            JSONObject().put("items", service.auditLog(site, args.optInt("limit", 50)))
         },
 
         tool(
@@ -257,6 +272,59 @@ class McpTools(
         ) { args ->
             service.urls(service.resolveSite(args.requireString("site")))
         },
+
+        tool(
+            "site_files_list",
+            "List uploaded files and current quota usage for a site.",
+            schema(required = listOf("site")) { prop("site", "string") },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            val store = service.fileStore(site)
+            JSONObject()
+                .put("items", store.index.list())
+                .put("usedBytes", store.usedBytes())
+        },
+
+        tool(
+            "site_file_upload",
+            "Upload a base64 file (max 2 MB here; larger files use the site HTTP API).",
+            schema(required = listOf("site", "name", "contentBase64")) {
+                prop("site", "string")
+                prop("name", "string")
+                prop("contentBase64", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            val manifest = service.manifest(site)
+                ?: throw DomainException("SITE_NOT_DEPLOYED", "site has no manifest yet")
+            val bytes = runCatching {
+                android.util.Base64.decode(args.requireString("contentBase64"), android.util.Base64.NO_WRAP)
+            }.getOrElse { throw DomainException("INVALID_ARGUMENT", "contentBase64 is not valid base64") }
+            if (bytes.size > MCP_UPLOAD_LIMIT) {
+                throw DomainException("FILE_TOO_LARGE", "MCP uploads are limited to $MCP_UPLOAD_LIMIT bytes")
+            }
+            val record = service.fileStore(site).save(args.requireString("name"), bytes, manifest.files)
+            JSONObject()
+                .put("id", record.id)
+                .put("name", record.name)
+                .put("mime", record.mime)
+                .put("size", record.size)
+                .put("sha256", record.sha256)
+        },
+
+        tool(
+            "site_file_delete",
+            "Delete one uploaded file.",
+            schema(required = listOf("site", "id")) {
+                prop("site", "string")
+                prop("id", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            val deleted = service.fileStore(site).delete(args.requireString("id"))
+            if (!deleted) throw DomainException("NOT_FOUND", "file not found")
+            JSONObject().put("deleted", true)
+        },
     )
 
     private val byName = tools.associateBy { it.name }
@@ -268,6 +336,7 @@ class McpTools(
 
     companion object {
         const val VERSION = "0.1.0"
+        const val MCP_UPLOAD_LIMIT = 2 * 1024 * 1024
     }
 }
 

@@ -51,7 +51,7 @@
 <section id="sitesBox" hidden>
   <h2>Sites</h2>
   <table>
-    <thead><tr><th>slug</th><th>port</th><th>exposure</th><th>read/write</th><th>actions</th></tr></thead>
+    <thead><tr><th>slug</th><th>port</th><th>exposure</th><th>read/write</th><th>URL</th></tr></thead>
     <tbody id="sites"></tbody>
   </table>
 </section>
@@ -59,6 +59,15 @@
 <section id="detail" hidden>
   <h2 id="detailTitle">Site</h2>
   <pre id="detailBody"></pre>
+
+  <h3>Files</h3>
+  <div class="row">
+    <input type="file" id="fileInput">
+    <button id="uploadBtn">Upload</button>
+    <span id="filesUsage" class="muted"></span>
+  </div>
+  <ul id="files"></ul>
+
   <h3>Deploy manifest</h3>
   <textarea id="manifest" spellcheck="false"></textarea>
   <div class="row">
@@ -66,12 +75,18 @@
     <button id="rotateWrite">Rotate write token</button>
     <button id="toggleExposure">Toggle LAN exposure</button>
     <button id="toggleReadAuth">Toggle read auth</button>
+    <button id="publicWrite">Make writes public…</button>
     <button id="deleteSite">Delete site</button>
   </div>
 </section>
 
 <section>
-  <h2>Log</h2>
+  <h2>Audit</h2>
+  <pre id="audit">(none yet)</pre>
+</section>
+
+<section>
+  <h2>Console</h2>
   <pre id="log"></pre>
 </section>
 
@@ -81,7 +96,8 @@
   let current = null;
 
   const log = (msg) => {
-    const line = `[${new Date().toLocaleTimeString()}] ${typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2)}`;
+    const line = `[${new Date().toLocaleTimeString()}] ` +
+      (typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2));
     $('log').textContent = line + "\n" + $('log').textContent;
   };
 
@@ -116,21 +132,54 @@
     const state = await api('/admin/api/state');
     $('state').textContent =
       `${state.sites}/${state.maxSites} sites · control 127.0.0.1:${state.controlPort} · LAN ${state.lanIpv4 || '-'}`;
+
     const list = await api('/admin/api/sites');
     const rows = $('sites');
     rows.innerHTML = '';
     for (const site of list.items) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><a href="#" data-ref="${site.id}">${site.slug}</a><br><span class="muted">${site.name}</span></td>
-        <td>${site.port}</td>
-        <td>${site.exposure}</td>
-        <td>${site.authRead}/${site.authWrite}</td>
-        <td><code class="muted">${site.urls.lan || site.urls.local}</code></td>`;
-      tr.querySelector('a').onclick = (e) => { e.preventDefault(); showDetail(site.id); };
+      const link = document.createElement('a');
+      link.href = '#';
+      link.textContent = site.slug;
+      link.onclick = (e) => { e.preventDefault(); showDetail(site.id); };
+
+      const nameCell = document.createElement('td');
+      nameCell.appendChild(link);
+      nameCell.appendChild(document.createElement('br'));
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'muted';
+      nameSpan.textContent = site.name;
+      nameCell.appendChild(nameSpan);
+
+      const portCell = document.createElement('td');
+      portCell.textContent = String(site.port);
+      const exposureCell = document.createElement('td');
+      exposureCell.textContent = site.exposure;
+      const authCell = document.createElement('td');
+      authCell.textContent = `${site.authRead}/${site.authWrite}`;
+      const urlCell = document.createElement('td');
+      const code = document.createElement('code');
+      code.className = 'muted';
+      code.textContent = site.urls.lan || site.urls.local;
+      urlCell.appendChild(code);
+
+      tr.append(nameCell, portCell, exposureCell, authCell, urlCell);
       rows.appendChild(tr);
     }
+
+    await refreshAudit();
     reveal(true);
+  }
+
+  async function refreshAudit() {
+    try {
+      const data = await api('/admin/api/logs');
+      $('audit').textContent = data.items.length === 0
+        ? '(none yet)'
+        : data.items
+            .map((e) => `${new Date(e.at).toLocaleString()} · ${e.action} · ${e.site || '-'} · ${e.detail || ''}`)
+            .join('\n');
+    } catch {}
   }
 
   async function showDetail(ref) {
@@ -142,11 +191,58 @@
     if (!($('manifest').value || '').trim() && data.manifest) {
       $('manifest').value = JSON.stringify(data.manifest, null, 2);
     }
+    await refreshFiles().catch(() => {});
   }
+
+  async function refreshFiles() {
+    if (!current) return;
+    const data = await api(`/admin/api/sites/${current.ref}/files`);
+    $('filesUsage').textContent =
+      `${data.items.length} file(s) · ${data.usedBytes} / ${data.quotaBytes} bytes`;
+    const list = $('files');
+    list.innerHTML = '';
+    for (const f of data.items) {
+      const li = document.createElement('li');
+      li.textContent = `${f.name} · ${f.mime} · ${f.size} bytes `;
+      const del = document.createElement('button');
+      del.textContent = 'delete';
+      del.onclick = async () => {
+        try {
+          await api(`/admin/api/sites/${current.ref}/files/${f.id}`, { method: 'DELETE' });
+          await refreshFiles();
+        } catch {}
+      };
+      li.appendChild(del);
+      list.appendChild(li);
+    }
+  }
+
+  $('uploadBtn').onclick = async () => {
+    if (!current) return;
+    const file = $('fileInput').files && $('fileInput').files[0];
+    if (!file) return log('pick a file first');
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (const byte of buffer) binary += String.fromCharCode(byte);
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/files`, {
+        method: 'POST',
+        body: JSON.stringify({ name: file.name, contentBase64: btoa(binary) }),
+      });
+      log(result);
+      $('fileInput').value = '';
+      await refreshFiles();
+    } catch {}
+  };
 
   $('save').onclick = async () => {
     sessionStorage.setItem('adminToken', $('token').value.trim());
-    try { await refresh(); } catch { sessionStorage.removeItem('adminToken'); reveal(false); }
+    try {
+      await refresh();
+    } catch {
+      sessionStorage.removeItem('adminToken');
+      reveal(false);
+    }
   };
 
   $('refresh').onclick = () => refresh().catch(() => {});
@@ -156,9 +252,13 @@
     const name = $('name').value.trim() || slug;
     if (!slug) return log('slug required');
     try {
-      const created = await api('/admin/api/sites', { method: 'POST', body: JSON.stringify({ slug, name }) });
+      const created = await api('/admin/api/sites', {
+        method: 'POST',
+        body: JSON.stringify({ slug, name }),
+      });
       log({ created: created.site.slug, writeToken: created.writeToken });
-      $('slug').value = ''; $('name').value = '';
+      $('slug').value = '';
+      $('name').value = '';
       await refresh();
     } catch {}
   };
@@ -179,9 +279,11 @@
     if (!current) return;
     try {
       const result = await api(`/admin/api/sites/${current.ref}/token`, {
-        method: 'POST', body: JSON.stringify({ which: 'write' }),
+        method: 'POST',
+        body: JSON.stringify({ which: 'write' }),
       });
       log(result);
+      await refreshAudit();
     } catch {}
   };
 
@@ -190,7 +292,8 @@
     const lan = current.site.exposure !== 'lan';
     try {
       const result = await api(`/admin/api/sites/${current.ref}/exposure`, {
-        method: 'PUT', body: JSON.stringify({ lan }),
+        method: 'PUT',
+        body: JSON.stringify({ lan }),
       });
       current.site = result.site;
       log(result.urls);
@@ -203,7 +306,25 @@
     const read = current.site.authRead === 'token' ? 'none' : 'token';
     try {
       const result = await api(`/admin/api/sites/${current.ref}/auth`, {
-        method: 'PUT', body: JSON.stringify({ read }),
+        method: 'PUT',
+        body: JSON.stringify({ read }),
+      });
+      log(result);
+      current.site = result.site;
+      await refresh();
+    } catch {}
+  };
+
+  $('publicWrite').onclick = async () => {
+    if (!current) return;
+    const ok = confirm(
+      'Public writes let anyone on the LAN create, change and delete data on this site. Continue?'
+    );
+    if (!ok) return;
+    try {
+      const result = await api(`/admin/api/sites/${current.ref}/auth`, {
+        method: 'PUT',
+        body: JSON.stringify({ write: 'none', confirmPublicWrite: true }),
       });
       log(result);
       current.site = result.site;

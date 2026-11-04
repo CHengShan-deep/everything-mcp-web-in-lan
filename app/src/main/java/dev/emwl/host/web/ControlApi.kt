@@ -7,6 +7,7 @@ import dev.emwl.host.Ports
 import dev.emwl.host.UiBridge
 import dev.emwl.host.domain.DomainException
 import dev.emwl.host.domain.Manifest
+import dev.emwl.host.domain.RequestGuards
 import dev.emwl.host.domain.Tokens
 import dev.emwl.host.service.SiteService
 import io.ktor.http.ContentType
@@ -44,6 +45,26 @@ fun Application.controlModule(
 ) {
     intercept(ApplicationCallPipeline.Plugins) {
         val path = call.request.path()
+
+        if (!RequestGuards.isLoopbackHost(call.request.headers["Host"])) {
+            call.respondText(
+                """{"error":{"code":"FORBIDDEN","message":"loopback Host required"}}""",
+                ContentType.Application.Json,
+                HttpStatusCode.Forbidden
+            )
+            finish()
+            return@intercept
+        }
+        if (!RequestGuards.isAllowedOrigin(call.request.headers["Origin"])) {
+            call.respondText(
+                """{"error":{"code":"FORBIDDEN","message":"origin rejected"}}""",
+                ContentType.Application.Json,
+                HttpStatusCode.Forbidden
+            )
+            finish()
+            return@intercept
+        }
+
         val expectedHash = when {
             path.startsWith("/admin/api") -> tokens.adminHash()
             path == "/mcp" -> tokens.mcpHash()
@@ -194,7 +215,21 @@ fun Application.controlModule(
                         site.id,
                         body.optString("read").takeIf { it.isNotEmpty() },
                         body.optString("write").takeIf { it.isNotEmpty() },
+                        confirmPublicWrite = body.optBoolean("confirmPublicWrite", false),
                     )
+                }
+            }
+
+            get("/sites/{ref}/logs") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    JSONObject().put("items", service.auditLog(site.slug, 100))
+                }
+            }
+
+            get("/logs") {
+                call.api {
+                    JSONObject().put("items", service.auditLog(null, 100))
                 }
             }
 
@@ -228,6 +263,52 @@ fun Application.controlModule(
                             countTotal = true,
                         ).toString()
                     )
+                }
+            }
+
+            get("/sites/{ref}/files") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val store = service.fileStore(site)
+                    JSONObject()
+                        .put("items", store.index.list())
+                        .put("usedBytes", store.usedBytes())
+                        .put("quotaBytes", dev.emwl.host.service.SiteFileStore.QUOTA_BYTES)
+                }
+            }
+
+            post("/sites/{ref}/files") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val manifest = service.manifest(site)
+                        ?: throw DomainException("SITE_NOT_DEPLOYED", "site has no manifest yet")
+                    val name = body.optString("name").ifEmpty { "upload.bin" }
+                    val bytes = runCatching {
+                        android.util.Base64.decode(
+                            body.optString("contentBase64"),
+                            android.util.Base64.NO_WRAP
+                        )
+                    }.getOrElse {
+                        throw DomainException("INVALID_ARGUMENT", "contentBase64 is not valid base64")
+                    }
+                    val record = service.fileStore(site).save(name, bytes, manifest.files)
+                    JSONObject()
+                        .put("id", record.id)
+                        .put("name", record.name)
+                        .put("mime", record.mime)
+                        .put("size", record.size)
+                        .put("sha256", record.sha256)
+                }
+            }
+
+            delete("/sites/{ref}/files/{id}") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val id = call.parameters["id"].orEmpty()
+                    if (!service.fileStore(site).delete(id)) {
+                        throw DomainException("NOT_FOUND", "file not found")
+                    }
+                    JSONObject().put("deleted", id)
                 }
             }
         }

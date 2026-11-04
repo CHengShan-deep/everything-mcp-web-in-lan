@@ -55,6 +55,31 @@ data class AuthPolicy(val read: String, val write: String) {
     }
 }
 
+data class FilePolicy(
+    val maxBytes: Long,
+    val allow: List<String>,
+) {
+    companion object {
+        const val HARD_MAX_BYTES = 100L * 1024 * 1024
+        val DEFAULT = FilePolicy(
+            maxBytes = 10L * 1024 * 1024,
+            allow = listOf("image/", "application/pdf", "text/", "application/json"),
+        )
+
+        fun parse(json: JSONObject?): FilePolicy {
+            if (json == null) return DEFAULT
+            val max = json.optLong("maxBytes", DEFAULT.maxBytes)
+            if (max <= 0 || max > HARD_MAX_BYTES) {
+                throw DomainException("INVALID_MANIFEST", "files.maxBytes out of range")
+            }
+            val allow = json.optJSONArray("allow")?.let { array ->
+                buildList { for (index in 0 until array.length()) add(array.getString(index)) }
+            } ?: DEFAULT.allow
+            return FilePolicy(max, allow)
+        }
+    }
+}
+
 data class Manifest(
     val schemaVersion: Int,
     val slug: String,
@@ -63,6 +88,7 @@ data class Manifest(
     val spaFallback: Boolean,
     val auth: AuthPolicy,
     val tables: Map<String, TableDef>,
+    val files: FilePolicy = FilePolicy.DEFAULT,
 ) {
 
     fun table(name: String): TableDef =
@@ -120,6 +146,7 @@ data class Manifest(
                 spaFallback = root.optBoolean("spaFallback", false),
                 auth = policy,
                 tables = tables,
+                files = FilePolicy.parse(root.optJSONObject("files")),
             )
         }
 
