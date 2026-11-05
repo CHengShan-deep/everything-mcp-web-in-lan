@@ -34,7 +34,8 @@ Current version: **0.2.0** (minSdk 29, targetSdk 36; verified on Android 10 and 
 - **Observability** — per-site request log (last 1000), traffic buckets by minute/hour/day, audit
   log of every control-plane change.
 - **App UX** — first-run guide, English/Chinese switch, per-site start/stop switches, battery and
-  OEM autostart guidance.
+  OEM autostart guidance, and a one-tap **Share MCP document** that hands the endpoint, token,
+  protocol notes and full tool list to your agent.
 
 ## Install
 

@@ -43,9 +43,11 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
+import androidx.core.content.FileProvider
 import dev.emwl.host.ui.AppPrefs
 import dev.emwl.host.ui.Lang
 import dev.emwl.host.ui.Strings
+import dev.emwl.host.web.McpTools
 import kotlinx.coroutines.delay
 
 private enum class AppScreen { MAIN, SETTINGS, GUIDE }
@@ -56,6 +58,7 @@ private data class SiteRow(
     val port: Int,
     val enabled: Boolean,
     val exposure: String,
+    val url: String,
 )
 
 class MainActivity : ComponentActivity() {
@@ -91,6 +94,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onBack = { screen = AppScreen.MAIN },
                             onGuide = { screen = AppScreen.GUIDE },
+                            onShareMcpDoc = { shareMcpDoc(lang) },
                             onBatteryExemption = { requestBatteryExemption() },
                             onAutostartSettings = { OemSettings.openAutostartSettings(this) },
                             onOpenAdmin = {
@@ -110,6 +114,7 @@ class MainActivity : ComponentActivity() {
                             onStart = { HostService.start(this) },
                             onStop = { HostService.stop(this) },
                             onToggleSite = { id, enabled -> toggleSite(id, enabled) },
+                            onCopySiteUrl = { url -> copyText(url) },
                             onBatteryExemption = { requestBatteryExemption() },
                             sites = { siteRows() },
                             console = { consoleText() },
@@ -170,6 +175,46 @@ class MainActivity : ComponentActivity() {
         clipboard.setPrimaryClip(ClipData.newPlainText("control token", token))
     }
 
+    private fun copyText(text: String) {
+        if (text.isEmpty()) return
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("PocketServe", text))
+    }
+
+    /**
+     * Generates the hand-off document from the live tool registry and opens the system share
+     * sheet, so the user can hand the endpoint and token straight to their agent.
+     */
+    private fun shareMcpDoc(lang: Lang) {
+        val runtime = HostState.runtime ?: return
+        val port = runtime.controlPort
+        val token = runtime.tokens.mcp
+        val doc = McpDoc.build(port, token, McpTools(runtime.service) { port }.tools)
+
+        val shared = runCatching {
+            val file = java.io.File(cacheDir, "share/${McpDoc.fileName()}")
+            file.parentFile?.mkdirs()
+            file.writeText(doc)
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/markdown"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_TEXT, doc)
+                putExtra(Intent.EXTRA_SUBJECT, "PocketServe MCP endpoint")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }.getOrElse {
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, doc)
+                putExtra(Intent.EXTRA_SUBJECT, "PocketServe MCP endpoint")
+            }
+        }
+        runCatching {
+            startActivity(Intent.createChooser(shared, Strings.shareMcpDoc.of(lang)))
+        }
+    }
+
     private fun openUrl(url: String) {
         runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
     }
@@ -179,10 +224,17 @@ class MainActivity : ComponentActivity() {
         Thread { runCatching { service.setEnabled(id, enabled) } }.start()
     }
 
-    private fun siteRows(): List<SiteRow> =
-        HostState.runtime?.service?.listSites()?.map { site ->
-            SiteRow(site.id, site.slug, site.port, site.enabled, site.exposure)
+    private fun siteRows(): List<SiteRow> {
+        val lanIp = Metrics.lanIpv4()
+        return HostState.runtime?.service?.listSites()?.map { site ->
+            val url = if (site.isLanExposed && lanIp != null) {
+                "http://$lanIp:${site.port}"
+            } else {
+                "http://127.0.0.1:${site.port}"
+            }
+            SiteRow(site.id, site.slug, site.port, site.enabled, site.exposure, url)
         } ?: emptyList()
+    }
 
     private fun versionName(): String = runCatching {
         if (Build.VERSION.SDK_INT >= 33) {
@@ -272,6 +324,7 @@ private fun HostScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onToggleSite: (String, Boolean) -> Unit,
+    onCopySiteUrl: (String) -> Unit,
     onBatteryExemption: () -> Unit,
     sites: () -> List<SiteRow>,
     console: () -> String,
@@ -280,6 +333,7 @@ private fun HostScreen(
     var batteryExempt by remember { mutableStateOf(true) }
     var autostartNote by remember { mutableStateOf("") }
     var siteList by remember { mutableStateOf(emptyList<SiteRow>()) }
+    var copiedNote by remember { mutableStateOf("") }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -356,7 +410,15 @@ private fun HostScreen(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    HostNode("site-${site.slug}", "text", "${site.slug} :${site.port}") {
+                    HostNode(
+                        id = "site-${site.slug}",
+                        role = "text",
+                        text = "${site.slug} :${site.port}",
+                        onClick = {
+                            onCopySiteUrl(site.url)
+                            copiedNote = "${Strings.copied.of(lang)}${site.url}"
+                        },
+                    ) {
                         Text(
                             "${site.slug} :${site.port} · ${site.exposure} · " +
                                 if (site.enabled) Strings.running.of(lang) else Strings.stopped.of(lang),
@@ -376,6 +438,15 @@ private fun HostScreen(
                     }
                 }
             }
+            HostNode("sites-hint", "text", Strings.tapSiteHint.of(lang)) {
+                Text(Strings.tapSiteHint.of(lang), style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        if (copiedNote.isNotEmpty()) {
+            HostNode("note-copied", "status", copiedNote) {
+                Text(copiedNote, style = MaterialTheme.typography.bodySmall)
+            }
         }
 
         Spacer(Modifier.height(8.dp))
@@ -391,6 +462,7 @@ private fun SettingsScreen(
     onLanguage: (Lang) -> Unit,
     onBack: () -> Unit,
     onGuide: () -> Unit,
+    onShareMcpDoc: () -> Unit,
     onBatteryExemption: () -> Unit,
     onAutostartSettings: () -> Unit,
     onOpenAdmin: () -> Unit,
@@ -436,6 +508,9 @@ private fun SettingsScreen(
         }
 
         Spacer(Modifier.height(8.dp))
+        HostNode("btn-share-mcp-doc", "button", Strings.shareMcpDoc.of(lang), onClick = onShareMcpDoc) {
+            Button(onClick = onShareMcpDoc) { Text(Strings.shareMcpDoc.of(lang)) }
+        }
         HostNode("btn-open-guide", "button", Strings.openGuide.of(lang), onClick = onGuide) {
             OutlinedButton(onClick = onGuide) { Text(Strings.openGuide.of(lang)) }
         }

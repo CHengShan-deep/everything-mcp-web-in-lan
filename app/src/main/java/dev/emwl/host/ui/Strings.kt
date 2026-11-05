@@ -21,8 +21,8 @@ object Strings {
     val settings = Text("Settings", "设置")
     val back = Text("Back", "返回")
 
-    val startHosting = Text("Start hosting", "开始托管")
-    val stopHosting = Text("Stop", "停止")
+    val startHosting = Text("Start MCP service", "启动 MCP 服务")
+    val stopHosting = Text("Stop MCP service", "关闭 MCP 服务")
     val batteryExemption = Text("Battery exemption", "电池豁免")
     val autostartSettings = Text("Autostart settings", "自启动设置")
     val openAdmin = Text("Open admin", "打开管理台")
@@ -39,12 +39,15 @@ object Strings {
     val noSites = Text("No sites yet. Create one over MCP or in the admin console.", "还没有站点。可通过 MCP 或管理台创建。")
     val running = Text("on", "运行中")
     val stopped = Text("off", "已停止")
+    val tapSiteHint = Text("Tap a site name to copy its URL.", "点击站点名称可复制访问地址。")
 
     val language = Text("Language", "语言")
     val english = Text("English", "English")
     val chinese = Text("中文", "中文")
     val openGuide = Text("Open guide", "打开新手引导")
+    val shareMcpDoc = Text("Share MCP document", "分享 MCP 文档")
     val version = Text("Version", "版本")
+    val copied = Text("Copied: ", "已复制：")
 
     val guideTitle = Text("Welcome to PocketServe", "欢迎使用 PocketServe")
     val guideIntro = Text(
@@ -53,8 +56,8 @@ object Strings {
     )
     val guideSteps = listOf(
         Text(
-            "1. Tap \"Start hosting\". The hosting service keeps running in the background.",
-            "1. 点击「开始托管」，托管服务会在后台常驻。",
+            "1. Tap \"Start MCP service\". The control plane keeps running in the background.",
+            "1. 点击「启动 MCP 服务」，控制面会在后台常驻。",
         ),
         Text(
             "2. Allow the battery exemption. Without it, LAN access stops when the phone sleeps.",
@@ -71,6 +74,10 @@ object Strings {
         Text(
             "5. Sites are reachable by port, and by name through the hub (port 47101) behind a reverse proxy.",
             "5. 站点可通过端口访问，也可经反代指到 hub（47101）后用域名访问。",
+        ),
+        Text(
+            "6. In Settings, tap \"Share MCP document\" and send it to your agent — it contains the endpoint and token.",
+            "6. 在「设置」里点「分享 MCP 文档」发给你的代理，文档里带好了地址和令牌。",
         ),
     )
     val guideDone = Text("Got it", "我知道了")
