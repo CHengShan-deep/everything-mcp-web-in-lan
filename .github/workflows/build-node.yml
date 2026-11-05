@@ -14,7 +14,7 @@ on:
       ndk_version:
         description: Android NDK version
         required: true
-        default: r28c
+        default: r29
       api_level:
         description: Android API level to target
         required: true
@@ -80,8 +80,7 @@ jobs:
             --cross-compiling \
             --openssl-no-asm \
             --with-intl="${{ inputs.intl }}" \
-            --without-npm \
-            --without-corepack
+            --without-npm
 
       - name: Build
         run: |
