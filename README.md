@@ -2,51 +2,121 @@
 
 [![ci](https://github.com/CHengShan-deep/everything-mcp-web-in-lan/actions/workflows/ci.yml/badge.svg)](https://github.com/CHengShan-deep/everything-mcp-web-in-lan/actions/workflows/ci.yml)
 
-Local-first website hosting for Android agents, managed over MCP.
-
-**Status: early skeleton.** Design derisking is done; v1 feature work
-(per-site data, REST, auth, admin console, MCP tools) is in progress.
+**PocketServe** — host real websites from an Android phone on your local network, managed by an
+agent over MCP.
 
 ## What it is
 
-- An Android app that hosts dynamic websites on the local network.
-- An MCP control plane bound to loopback (`127.0.0.1`) so on-device agents can create sites, deploy content, manage schemas/data, configure auth, and get URLs.
-- A LAN data plane with per-site ports, optional FQDN access through internal DNS, and an optional 80-port gateway for bare names.
-- Per-site SQLite, generated REST, optional write protection, file storage, versions, and backups.
-- Default local-only; LAN exposure is opt-in per site. Admin and MCP are always authenticated.
+- **PocketServe app**: a foreground service that serves dynamic sites over HTTP from the phone.
+- **MCP control plane** on `127.0.0.1` (loopback only): 31 tools so an on-device agent can create
+  sites, deploy content, change schemas, manage auth, files, backups and revisions.
+- **Admin console** at `/admin`: token login, sites, deploy, backups, revisions, traffic, audit log.
+- **LAN data plane**: one port per site, plus a hub on `47101` that routes by `Host` header, so a
+  single reverse-proxy rule can serve every `<name>.<base domain>`.
 
-## Scope
+Current version: **0.2.0** (minSdk 29, targetSdk 36; verified on Android 10 and 14).
 
-- v1: platform-managed backend (SQLite + declarative schema + generated REST + optional constrained JS hooks), Android 10+ (minSdk 29), sideload/F-Droid.
-- v2+: full Node.js runtime; Python later.
+## Features
 
-## Current skeleton
+- **Sites** — per-site SQLite, manifest-declared tables/fields/indexes, generated REST
+  (`GET|POST|PATCH|DELETE /api/{table}[/{id}]`), static content with SPA fallback.
+- **Auth** — read `none|token`, write `token|none` with hashed, rotatable tokens; anonymous writes
+  require an explicit confirmation.
+- **Files** — per-site uploads with MIME sniffing, executable-type rejection, quota, `ETag`/`Range`
+  downloads.
+- **Backups** — full archive (manifest, data snapshot, uploads, static tree), WAL-safe snapshots
+  (`VACUUM INTO` with a quiesce fallback for older SQLite), verified restores, and restoring an
+  archive into a brand-new site.
+- **Revisions** — immutable content snapshots with content-hash dedupe, atomic staged swaps, and
+  rollback that leaves data and uploads untouched.
+- **Schema safety** — destructive migrations (dropped table/column, type change, backfills) are
+  refused unless explicitly confirmed; rebuilds are transactional and keep row ids.
+- **Observability** — per-site request log (last 1000), traffic buckets by minute/hour/day, audit
+  log of every control-plane change.
+- **App UX** — first-run guide, English/Chinese switch, per-site start/stop switches, battery and
+  OEM autostart guidance.
 
-The repository now contains the app skeleton, not the final v1 feature set:
+## Install
 
-- a `specialUse` foreground service that survives reboots, app updates and process death
-- the loopback control plane on `127.0.0.1:47100` with automatic fallback when the port is taken
-- a LAN hub on `47101` and one listener per hosted site on `47200+`
-- a machine-readable UI (`/ui`, `/ui/action`) so on-device agents can read the screen and drive it without screenshots
-- diagnostics at `/diag` and `/sites` on the control plane
-
-## Build
-
-Requires JDK 21 and Android SDK 36.
+Grab `app-debug.apk` from the latest successful `ci` run (Actions → artifacts) and sideload it:
 
 ```bash
-./gradlew assembleDebug
-./gradlew testDebugUnitTest
+adb install -r app-debug.apk
 ```
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+A fresh install may need the OEM installer's in-person confirmation; on MIUI also enable
+"Install via USB" in developer options.
 
-## Device notes
+### Release builds
 
-- Battery-optimization exemption is required for LAN availability while the device is in Doze.
-- Some OEM builds (for example MIUI) block autostart after reboot: open the app once after a reboot, or allow autostart for it in system settings.
-- A fresh sideload may need the OEM installer's in-person confirmation (within about ten seconds); on MIUI also enable "Install via USB" in developer options.
-- The control plane is loopback-only. LAN exposure is explicit per site.
+The keystore is never committed. Provide it through environment variables (or `-PemwlKeystore=…`):
+
+```bash
+export EMWL_KEYSTORE=/path/to/pocketserve.jks
+export EMWL_KEYSTORE_PASSWORD=…
+export EMWL_KEY_ALIAS=…
+export EMWL_KEY_PASSWORD=…
+./gradlew assembleRelease
+```
+
+Without those variables `assembleRelease` still builds, but produces an unsigned APK.
+
+## Quick start
+
+1. Open the app and tap **Start hosting**. The service keeps running in the background.
+2. Allow **Battery exemption** — without it, Android Doze cuts LAN access even for the loopback.
+3. Allow **Autostart** in your vendor settings (`MIUI`/`ColorOS` block it by default). If you skip
+   this, open the app once after each reboot; the app tells you when a system start was blocked.
+4. Copy the **MCP token** from the app (Settings → Copy MCP token).
+5. Create and deploy a site over MCP:
+
+```bash
+curl -s http://127.0.0.1:47100/mcp \
+  -H "Authorization: Bearer $MCP_TOKEN" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"site_create",
+       "arguments":{"slug":"hello","name":"Hello"}}}'
+```
+
+Then `site_deploy` with a manifest, `site_exposure_set` to open it to the LAN, and `site_url_get`
+for the URLs. After each permission change, reload the app screen to see the updated state.
+
+## LAN access and the gateway
+
+- Each site listens on its own port (`47200`–`47231`, stable across restarts).
+- The hub on `47101` routes by `Host`: `Host: hello.lan` → the site named `hello`. Local-only sites
+  are not routed there.
+- **Port 80 cannot be bound from the app** on Android 10 or 14 (`EACCES`, measured and reported in
+  `/diag`), so a bare-name gateway needs an external reverse proxy in front of the hub, for example:
+
+```
+# Caddyfile
+*.lan {
+    reverse_proxy 192.168.1.50:47101
+}
+```
+
+## Device caveats
+
+- Battery-optimization exemption is a hard prerequisite for LAN availability in Doze.
+- Some OEM builds block autostart after reboot (`process is not permitted to auto start` on MIUI);
+  ColorOS may freeze the process on screen-off until a packet arrives.
+- A fresh sideload may need a 10-second in-person confirmation from the OEM installer.
+
+## Limits
+
+- 32 registered and 32 concurrently served sites.
+- 20 revisions and 20 backups kept per site; request log keeps the last 1000 entries.
+- v1 hosts platform-managed backends only; a Node.js runtime is planned for v2.
+
+## Build and test
+
+```bash
+./gradlew assembleDebug        # debug APK
+./gradlew testDebugUnitTest    # JVM unit tests
+./gradlew lintDebug            # Android lint
+```
+
+Requires JDK 21 and Android SDK 36.
 
 ## Docs
 

@@ -8,12 +8,16 @@ android {
     namespace = "dev.emwl.host"
     compileSdk = 36
 
+    // Release signing stays out of the repository: point these at a local keystore or set the
+    // matching environment variables in CI. Without them the release build is simply unsigned.
+    val releaseKeystore = System.getenv("EMWL_KEYSTORE") ?: (findProperty("emwlKeystore") as String?)
+
     defaultConfig {
         applicationId = "dev.emwl.host"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildFeatures {
@@ -25,9 +29,23 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("EMWL_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("EMWL_KEY_ALIAS")
+                keyPassword = System.getenv("EMWL_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
