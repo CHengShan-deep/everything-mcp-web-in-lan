@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.delay
 
@@ -56,6 +57,7 @@ class MainActivity : ComponentActivity() {
                         onStart = { HostService.start(this) },
                         onStop = { HostService.stop(this) },
                         onBatteryExemption = { requestBatteryExemption() },
+                        onAutostartSettings = { OemSettings.openAutostartSettings(this) },
                         onOpenAdmin = {
                             openUrl("http://127.0.0.1:${HostState.runtime?.controlPort ?: Ports.CONTROL}/admin")
                         },
@@ -150,9 +152,28 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Reports what happened to the last system-triggered start. A service start shortly after the
+ * boot broadcast means autostart worked; otherwise an OEM blocked it and the user had to open
+ * the app, which is exactly the caveat the UI has to surface.
+ */
+private fun autostartSummary(context: android.content.Context): String {
+    val prefs = context.getSharedPreferences("host", android.content.Context.MODE_PRIVATE)
+    val attempt = prefs.getLong("lastAutostartAt", 0L)
+    if (attempt == 0L) return ""
+    val started = prefs.getLong("lastServiceStartAt", 0L)
+    val at = android.text.format.DateFormat.format("MM-dd HH:mm", attempt)
+    val source = prefs.getString("lastAutostartAction", "").orEmpty().substringAfterLast('.')
+    return if (started in attempt..(attempt + 90_000L)) {
+        "System start ($source) worked at $at."
+    } else {
+        "System start ($source) at $at did not take effect: ${OemSettings.vendor()} blocks it. " +
+            "Open the app once after each reboot, or allow autostart in settings."
+    }
+}
+
 @Composable
-private fun HostNode(
-    id: String,
+private fun HostNode(    id: String,
     role: String,
     text: String,
     enabled: Boolean = true,
@@ -182,6 +203,7 @@ private fun HostScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onBatteryExemption: () -> Unit,
+    onAutostartSettings: () -> Unit,
     onOpenAdmin: () -> Unit,
     onOpenHub: () -> Unit,
     onCopyAdmin: () -> Unit,
@@ -189,10 +211,18 @@ private fun HostScreen(
     console: () -> String,
 ) {
     var consoleText by remember { mutableStateOf("") }
+    var batteryExempt by remember { mutableStateOf(true) }
+    var autostartNote by remember { mutableStateOf("") }
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
+        val power = context.getSystemService(PowerManager::class.java)
         while (true) {
             consoleText = runCatching { console() }.getOrElse { "console error: ${it.message}" }
+            batteryExempt = runCatching {
+                power.isIgnoringBatteryOptimizations(context.packageName)
+            }.getOrDefault(true)
+            autostartNote = runCatching { autostartSummary(context) }.getOrDefault("")
             delay(1000)
         }
     }
@@ -221,11 +251,34 @@ private fun HostScreen(
             HostNode("btn-battery", "button", "Battery exemption", onClick = onBatteryExemption) {
                 OutlinedButton(onClick = onBatteryExemption) { Text("Battery exemption") }
             }
+            HostNode("btn-autostart", "button", "Autostart settings", onClick = onAutostartSettings) {
+                OutlinedButton(onClick = onAutostartSettings) { Text("Autostart settings") }
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             HostNode("btn-open-admin", "button", "Open admin", onClick = onOpenAdmin) {
                 OutlinedButton(onClick = onOpenAdmin) { Text("Open admin") }
             }
             HostNode("btn-open-hub", "button", "Open hub", onClick = onOpenHub) {
                 OutlinedButton(onClick = onOpenHub) { Text("Open hub") }
+            }
+        }
+
+        if (!batteryExempt) {
+            HostNode("warn-battery", "status", "Battery optimization is on") {
+                Text(
+                    "Battery optimization is on: LAN access stops when the phone sleeps. " +
+                        "Tap \"Battery exemption\" and allow it.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        if (autostartNote.isNotEmpty()) {
+            HostNode("note-autostart", "status", autostartNote) {
+                Text(autostartNote, style = MaterialTheme.typography.bodySmall)
             }
         }
 

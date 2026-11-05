@@ -11,6 +11,10 @@ class BootReceiver : BroadcastReceiver() {
         ) {
             return
         }
+        context.getSharedPreferences("host", Context.MODE_PRIVATE).edit()
+            .putLong("lastAutostartAt", System.currentTimeMillis())
+            .putString("lastAutostartAction", intent.action)
+            .apply()
         runCatching { HostService.start(context) }
             .onFailure { HostState.lastServiceError = "autostart failed: ${it.message}" }
     }

@@ -82,6 +82,9 @@ class HostService : Service() {
 
         HostState.runtime = runtime
         HostState.startedAt = System.currentTimeMillis()
+        getSharedPreferences("host", MODE_PRIVATE).edit()
+            .putLong("lastServiceStartAt", HostState.startedAt)
+            .apply()
         refreshNotification()
     }
 
