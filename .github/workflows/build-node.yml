@@ -1,0 +1,120 @@
+name: build-node
+
+# Builds a stock Node.js executable for Android arm64 (bionic) from source.
+# The binary is meant to ship inside the app and be exec'd from nativeLibraryDir,
+# so it must be PIE, 16 KB-page aligned and self-contained apart from bionic libs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: Node.js version to build (e.g. v26.13.0)
+        required: true
+        default: v26.13.0
+      ndk_version:
+        description: Android NDK version
+        required: true
+        default: r28c
+      api_level:
+        description: Android API level to target
+        required: true
+        default: "29"
+      intl:
+        description: ICU mode (none | small-icu | full-icu)
+        required: true
+        default: small-icu
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-node-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Show runner
+        run: |
+          uname -a
+          nproc
+          df -h /
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential python3 python3-distutils patch xz-utils curl
+
+      - name: Fetch Node.js source
+        run: |
+          V="${{ inputs.node_version }}"
+          curl -fsSL --retry 3 -o node.tar.xz "https://nodejs.org/dist/${V}/node-${V}.tar.xz"
+          tar -xf node.tar.xz
+          echo "SRC=${PWD}/node-${V}" >> "$GITHUB_ENV"
+          ls -d node-*/
+
+      - name: Fetch Android NDK
+        run: |
+          NDK="${{ inputs.ndk_version }}"
+          curl -fsSL --retry 3 -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK}-linux.zip"
+          unzip -q ndk.zip
+          echo "NDK=${PWD}/android-ndk-${NDK}" >> "$GITHUB_ENV"
+          ls -d android-ndk-*/
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          API="${{ inputs.api_level }}"
+          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOL/aarch64-linux-android${API}-clang"
+          export CXX="$TOOL/aarch64-linux-android${API}-clang++"
+          export AR="$TOOL/llvm-ar"
+          export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=arm64 host_os=linux OS=android android_ndk_path=$NDK"
+          export LDFLAGS="-Wl,--max-page-size=16384"
+          ./configure \
+            --dest-cpu=arm64 \
+            --dest-os=android \
+            --cross-compiling \
+            --openssl-no-asm \
+            --with-intl="${{ inputs.intl }}" \
+            --without-npm \
+            --without-corepack
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          make -j"$(nproc)" node
+          ls -l out/Release/node
+          file out/Release/node || true
+
+      - name: Inspect and strip
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cp out/Release/node node-raw
+          "$TOOL/llvm-strip" --strip-all node-raw
+          echo "== size =="
+          ls -l out/Release/node node-raw
+          echo "== LOAD alignment =="
+          "$TOOL/llvm-readelf" -l node-raw | grep -E "^  LOAD"
+          echo "== NEEDED =="
+          "$TOOL/llvm-readelf" -d node-raw | grep -E "NEEDED|RUNPATH|RPATH" || true
+          echo "== page alignment check =="
+          if "$TOOL/llvm-readelf" -l node-raw | awk '/^  LOAD/{print $NF}' | grep -qv '0x4000'; then
+            echo "::warning::not all LOAD segments are 16 KB aligned"
+          fi
+          sha256sum node-raw
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ inputs.node_version }}-android-arm64
+          path: |
+            ${{ env.SRC }}/node-raw
+            ${{ env.SRC }}/LICENSE
+          retention-days: 30
