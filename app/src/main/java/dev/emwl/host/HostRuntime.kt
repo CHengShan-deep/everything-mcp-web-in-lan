@@ -38,6 +38,7 @@ class HostRuntime(private val ctx: Context) {
 
     @Synchronized
     fun start() {
+        Capabilities.probe()
         for (candidate in Ports.controlCandidates()) {
             if (!portFree("127.0.0.1", candidate)) {
                 controlError = "port $candidate busy"

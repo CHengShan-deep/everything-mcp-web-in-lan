@@ -81,6 +81,17 @@
   </div>
   <ul id="revisions"></ul>
 
+  <h3>Traffic</h3>
+  <div class="row">
+    <select id="trafficRange">
+      <option value="24">last 24 hours</option>
+      <option value="168">last 7 days</option>
+    </select>
+    <span id="trafficSummary" class="muted"></span>
+  </div>
+  <svg id="trafficChart" width="100%" height="120" viewBox="0 0 600 120"></svg>
+  <ul id="trafficTop"></ul>
+
   <h3>Requests</h3>
   <div class="row">
     <span id="requestSummary" class="muted"></span>
@@ -215,7 +226,56 @@
     await refreshBackups().catch(() => {});
     await refreshRevisions().catch(() => {});
     await refreshRequests().catch(() => {});
+    await refreshTraffic().catch(() => {});
   }
+
+  async function refreshTraffic() {
+    if (!current) return;
+    const hours = Number($('trafficRange').value || 24);
+    const bucket = hours > 48 ? 'day' : 'hour';
+    const data = await api(`/admin/api/sites/${current.ref}/traffic?hours=${hours}&bucket=${bucket}`);
+    $('trafficSummary').textContent =
+      `${data.totals.requests} request(s) · 4xx ${data.totals.clientErrors} · 5xx ${data.totals.serverErrors}` +
+      ` · avg ${Math.round(data.totals.avgMs)} ms · keeping the last ${data.retained}`;
+    drawTraffic(data);
+    const list = $('trafficTop');
+    list.innerHTML = '';
+    for (const p of data.topPaths) {
+      const li = document.createElement('li');
+      li.textContent = `${p.path} · ${p.requests} request(s) · slowest ${p.slowestMs} ms`;
+      list.appendChild(li);
+    }
+  }
+
+  function drawTraffic(data) {
+    const svg = $('trafficChart');
+    const width = 600;
+    const height = 120;
+    svg.innerHTML = '';
+    const buckets = data.buckets || [];
+    if (!buckets.length) return;
+    const max = Math.max(...buckets.map((b) => b.total), 1);
+    const slot = width / buckets.length;
+    const barWidth = Math.max(1, slot * 0.8);
+    const ns = 'http://www.w3.org/2000/svg';
+    for (const b of buckets) {
+      const index = buckets.indexOf(b);
+      const h = (b.total / max) * (height - 16);
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', (index * slot + (slot - barWidth) / 2).toFixed(1));
+      rect.setAttribute('y', (height - h).toFixed(1));
+      rect.setAttribute('width', barWidth.toFixed(1));
+      rect.setAttribute('height', Math.max(1, h).toFixed(1));
+      rect.setAttribute('fill', b.serverErrors > 0 ? '#c0392b' : b.clientErrors > 0 ? '#d68910' : '#5b7cfa');
+      const title = document.createElementNS(ns, 'title');
+      title.textContent =
+        `${new Date(b.at).toLocaleString()} · ${b.total} request(s) · 4xx ${b.clientErrors} · 5xx ${b.serverErrors}`;
+      rect.appendChild(title);
+      svg.appendChild(rect);
+    }
+  }
+
+  $('trafficRange').onchange = () => refreshTraffic().catch(() => {});
 
   async function refreshRequests() {
     if (!current) return;

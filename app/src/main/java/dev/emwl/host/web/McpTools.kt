@@ -437,6 +437,22 @@ class McpTools(
         },
 
         tool(
+            "site_traffic_get",
+            "Request volume, error counts and latency per time bucket (minute/hour/day) for one site.",
+            schema(required = listOf("site")) {
+                prop("site", "string")
+                prop("hours", "integer")
+                prop("bucket", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.database(site).requestStats(
+                hours = args.optInt("hours", 24).coerceIn(1, 24 * 30),
+                bucket = args.optString("bucket").takeIf { it.isNotEmpty() } ?: "hour",
+            )
+        },
+
+        tool(
             "site_requests_get",
             "Recent requests served by one site, newest first. status accepts a code (404) or a class (4xx).",
             schema(required = listOf("site")) {

@@ -422,6 +422,116 @@ class SiteDatabase(context: Context, siteId: String) {
         }
     }
 
+    /** Traffic over the retained log: per-bucket counts, status classes, latency and top paths. */
+    fun requestStats(hours: Int, bucket: String): JSONObject {
+        val bucketMs = when (bucket) {
+            "minute" -> 60_000L
+            "hour" -> 3_600_000L
+            "day" -> 86_400_000L
+            else -> throw DomainException("INVALID_ARGUMENT", "bucket must be minute, hour or day")
+        }
+        val until = System.currentTimeMillis()
+        val since = until - hours * 3_600_000L
+
+        val buckets = JSONArray()
+        var total = 0L
+        var clientErrors = 0L
+        var serverErrors = 0L
+        var latencySum = 0L
+        var latencyCount = 0L
+
+        db.rawQuery(
+            """
+            SELECT (at / ?) * ? AS bucket,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) AS client_errors,
+                   SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS server_errors,
+                   AVG(ms) AS avg_ms
+            FROM _requests
+            WHERE at >= ?
+            GROUP BY bucket
+            ORDER BY bucket
+            """.trimIndent(),
+            arrayOf(bucketMs.toString(), bucketMs.toString(), since.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val count = cursor.getLong(cursor.getColumnIndexOrThrow("total"))
+                val c4 = cursor.getLong(cursor.getColumnIndexOrThrow("client_errors"))
+                val c5 = cursor.getLong(cursor.getColumnIndexOrThrow("server_errors"))
+                val avgIndex = cursor.getColumnIndexOrThrow("avg_ms")
+                val avg = if (cursor.isNull(avgIndex)) 0.0 else cursor.getDouble(avgIndex)
+                total += count
+                clientErrors += c4
+                serverErrors += c5
+                latencySum += (avg * count).toLong()
+                latencyCount += count
+                buckets.put(
+                    JSONObject()
+                        .put("at", cursor.getLong(cursor.getColumnIndexOrThrow("bucket")))
+                        .put("total", count)
+                        .put("clientErrors", c4)
+                        .put("serverErrors", c5)
+                        .put("avgMs", avg)
+                )
+            }
+        }
+
+        val byStatus = JSONObject()
+        db.rawQuery(
+            "SELECT status, COUNT(*) AS n FROM _requests WHERE at >= ? GROUP BY status ORDER BY n DESC",
+            arrayOf(since.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                byStatus.put(cursor.getString(0), cursor.getLong(1))
+            }
+        }
+
+        val topPaths = JSONArray()
+        db.rawQuery(
+            """
+            SELECT path, COUNT(*) AS n, MAX(ms) AS slowest
+            FROM _requests
+            WHERE at >= ?
+            GROUP BY path
+            ORDER BY n DESC
+            LIMIT 5
+            """.trimIndent(),
+            arrayOf(since.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                topPaths.put(
+                    JSONObject()
+                        .put("path", cursor.getString(0))
+                        .put("requests", cursor.getLong(1))
+                        .put("slowestMs", cursor.getLong(2))
+                )
+            }
+        }
+
+        val retained = db.rawQuery("SELECT COUNT(*), MIN(at) FROM _requests", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) to (if (cursor.isNull(1)) null else cursor.getLong(1))
+            else 0L to null
+        }
+
+        return JSONObject()
+            .put("since", since)
+            .put("until", until)
+            .put("bucketMs", bucketMs)
+            .put("buckets", buckets)
+            .put("byStatus", byStatus)
+            .put("topPaths", topPaths)
+            .put(
+                "totals",
+                JSONObject()
+                    .put("requests", total)
+                    .put("clientErrors", clientErrors)
+                    .put("serverErrors", serverErrors)
+                    .put("avgMs", if (latencyCount == 0L) 0.0 else latencySum.toDouble() / latencyCount)
+            )
+            .put("retained", retained.first)
+            .put("oldestAt", retained.second ?: JSONObject.NULL)
+    }
+
     fun listRequests(limit: Int, offset: Int, status: String?, path: String?): JSONObject {
         val where = ArrayList<String>()
         val args = ArrayList<String>()

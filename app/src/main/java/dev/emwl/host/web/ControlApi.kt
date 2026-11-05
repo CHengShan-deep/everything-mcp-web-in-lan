@@ -379,6 +379,17 @@ fun Application.controlModule(
                 }
             }
 
+            get("/sites/{ref}/traffic") {
+                call.api {
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val query = call.request.queryParameters
+                    service.database(site).requestStats(
+                        hours = (query["hours"]?.toIntOrNull() ?: 24).coerceIn(1, 24 * 30),
+                        bucket = query["bucket"]?.takeIf { it.isNotEmpty() } ?: "hour",
+                    )
+                }
+            }
+
             get("/sites/{ref}/requests") {
                 call.api {
                     val site = service.resolveSite(call.parameters["ref"].orEmpty())
@@ -414,6 +425,16 @@ private fun diagJson(service: SiteService, controlPort: Int): String = JSONObjec
     .put("pssKb", Metrics.pssKb())
     .put("sites", service.listSites().size)
     .put("baseDomain", service.baseDomain)
+    .put(
+        "capabilities",
+        JSONObject()
+            .put("port80Bindable", dev.emwl.host.Capabilities.port80Bindable ?: JSONObject.NULL)
+            .put("port80Error", dev.emwl.host.Capabilities.port80Error ?: JSONObject.NULL)
+            .put(
+                "unprivilegedPortStart",
+                dev.emwl.host.Capabilities.unprivilegedPortStart ?: JSONObject.NULL
+            )
+    )
     .toString()
 
 private suspend fun ApplicationCall.respondJson(body: JSONObject, status: HttpStatusCode = HttpStatusCode.OK) {
