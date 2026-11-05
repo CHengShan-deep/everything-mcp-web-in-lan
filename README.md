@@ -25,8 +25,9 @@ Current version: **0.2.0** (minSdk 29, targetSdk 36; verified on Android 10 and 
 - **Files** — per-site uploads with MIME sniffing, executable-type rejection, quota, `ETag`/`Range`
   downloads.
 - **Backups** — full archive (manifest, data snapshot, uploads, static tree), WAL-safe snapshots
-  (`VACUUM INTO` with a quiesce fallback for older SQLite), verified restores, and restoring an
-  archive into a brand-new site.
+  (`VACUUM INTO` with a quiesce fallback for older SQLite), verified restores, restoring an
+  archive into a brand-new site, and passphrase-sealed export/import (AES-256-GCM over PBKDF2)
+  for moving a site off the device.
 - **Revisions** — immutable content snapshots with content-hash dedupe, atomic staged swaps, and
   rollback that leaves data and uploads untouched.
 - **Schema safety** — destructive migrations (dropped table/column, type change, backfills) are
