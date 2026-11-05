@@ -229,6 +229,14 @@ fun Application.controlModule(
                 }
             }
 
+            put("/sites/{ref}/enabled") {
+                call.api { body ->
+                    val site = service.resolveSite(call.parameters["ref"].orEmpty())
+                    val updated = service.setEnabled(site.id, body.optBoolean("enabled", true))
+                    JSONObject().put("site", service.siteJson(updated))
+                }
+            }
+
             get("/sites/{ref}/logs") {
                 call.api {
                     val site = service.resolveSite(call.parameters["ref"].orEmpty())

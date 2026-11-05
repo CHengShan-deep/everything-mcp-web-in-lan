@@ -192,5 +192,5 @@ class HostRuntime(private val ctx: Context) {
     private fun hostSite(call: io.ktor.server.application.ApplicationCall): dev.emwl.host.data.SiteRecord? =
         HostRouting.slugForHost(call.request.headers["Host"], service.baseDomain)
             ?.let { slug -> service.repository().findBySlug(slug) }
-            ?.takeIf { it.isLanExposed }
+            ?.takeIf { it.isLanExposed && it.enabled }
 }

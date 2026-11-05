@@ -75,6 +75,7 @@ class SiteService(private val context: Context) {
             writeTokenHash = Tokens.sha256Hex(writeToken),
             manifestJson = null,
             servedRevision = null,
+            enabled = true,
             createdAt = now,
             updatedAt = now,
         )
@@ -163,6 +164,16 @@ class SiteService(private val context: Context) {
         readToken?.let { result.put("readToken", it) }
         if (movingToPublicWrite) result.put("publicWrite", true)
         return result
+    }
+
+    /** Disabling a site stops its listener and takes it out of hub routing; data is untouched. */
+    fun setEnabled(id: String, enabled: Boolean): SiteRecord {
+        val site = requireSite(id)
+        val updated = site.copy(enabled = enabled, updatedAt = System.currentTimeMillis())
+        repository.update(updated)
+        if (enabled) startListener(updated) else stopListenerFor(id)
+        audit("site_enabled_change", updated, enabled.toString())
+        return updated
     }
 
     fun rotateToken(id: String, which: String): JSONObject {
@@ -314,6 +325,7 @@ class SiteService(private val context: Context) {
         .put("authWrite", site.authWrite)
         .put("hasManifest", site.manifestJson != null)
         .put("servedRevision", site.servedRevision ?: JSONObject.NULL)
+        .put("enabled", site.enabled)
         .put("createdAt", site.createdAt)
         .put("updatedAt", site.updatedAt)
 
@@ -325,6 +337,7 @@ class SiteService(private val context: Context) {
     }
 
     fun startListener(site: SiteRecord) {
+        if (!site.enabled) return
         val self = this
         scope.launch {
             synchronized(listenerLock) {

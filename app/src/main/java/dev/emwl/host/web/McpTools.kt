@@ -250,6 +250,19 @@ class McpTools(
         },
 
         tool(
+            "site_enabled_set",
+            "Start or stop one site. A stopped site does not listen and is not routed by the hub.",
+            schema(required = listOf("site", "enabled")) {
+                prop("site", "string")
+                prop("enabled", "boolean")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            if (!args.has("enabled")) throw DomainException("INVALID_ARGUMENT", "enabled is required")
+            JSONObject().put("site", service.siteJson(service.setEnabled(site.id, args.getBoolean("enabled"))))
+        },
+
+        tool(
             "site_token_rotate",
             "Rotate the read or write token and return the new token once.",
             schema(required = listOf("site", "which")) {
@@ -481,7 +494,7 @@ class McpTools(
     }
 
     companion object {
-        const val VERSION = "0.1.0"
+        const val VERSION = "0.2.0"
         const val MCP_UPLOAD_LIMIT = 2 * 1024 * 1024
     }
 }

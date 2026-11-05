@@ -19,6 +19,7 @@ data class SiteRecord(
     val writeTokenHash: String?,
     val manifestJson: String?,
     val servedRevision: String?,
+    val enabled: Boolean,
     val createdAt: Long,
     val updatedAt: Long,
 ) {
@@ -52,6 +53,7 @@ class SiteRepository(context: Context) :
                 write_token_hash TEXT,
                 manifest_json TEXT,
                 served_revision TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -75,6 +77,7 @@ class SiteRepository(context: Context) :
             when (version) {
                 1 -> createAuditTable(db)
                 2 -> db.execSQL("ALTER TABLE sites ADD COLUMN served_revision TEXT")
+                3 -> db.execSQL("ALTER TABLE sites ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
                 else -> error("no migration from version $version")
             }
             version++
@@ -159,6 +162,7 @@ class SiteRepository(context: Context) :
             put("write_token_hash", record.writeTokenHash)
             put("manifest_json", record.manifestJson)
             put("served_revision", record.servedRevision)
+            put("enabled", if (record.enabled) 1 else 0)
             put("created_at", record.createdAt)
             put("updated_at", record.updatedAt)
         }
@@ -177,6 +181,7 @@ class SiteRepository(context: Context) :
             put("write_token_hash", record.writeTokenHash)
             put("manifest_json", record.manifestJson)
             put("served_revision", record.servedRevision)
+            put("enabled", if (record.enabled) 1 else 0)
             put("updated_at", record.updatedAt)
         }
         val rows = writableDatabase.update("sites", values, "id = ?", arrayOf(record.id))
@@ -243,6 +248,7 @@ class SiteRepository(context: Context) :
         writeTokenHash = getStringOrNull("write_token_hash"),
         manifestJson = getStringOrNull("manifest_json"),
         servedRevision = getStringOrNull("served_revision"),
+        enabled = getInt(getColumnIndexOrThrow("enabled")) != 0,
         createdAt = getLong(getColumnIndexOrThrow("created_at")),
         updatedAt = getLong(getColumnIndexOrThrow("updated_at")),
     )
@@ -254,7 +260,7 @@ class SiteRepository(context: Context) :
 
     companion object {
         const val DATABASE_NAME = "registry.db"
-        const val VERSION = 3
+        const val VERSION = 4
         const val PORT_BASE = 47200
         const val PORTS = 32
         const val COOLDOWN_MS = 7L * 24 * 60 * 60 * 1000

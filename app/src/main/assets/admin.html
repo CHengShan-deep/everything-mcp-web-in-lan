@@ -103,6 +103,7 @@
   <textarea id="manifest" spellcheck="false"></textarea>
   <div class="row">
     <button id="deployBtn">Deploy</button>
+    <button id="toggleEnabled">Stop site</button>
     <button id="rotateWrite">Rotate write token</button>
     <button id="toggleExposure">Toggle LAN exposure</button>
     <button id="toggleReadAuth">Toggle read auth</button>
@@ -219,6 +220,7 @@
     $('detail').hidden = false;
     $('detailTitle').textContent = `${data.site.slug} · :${data.site.port}`;
     $('detailBody').textContent = JSON.stringify({ urls: data.urls, tables: data.tables }, null, 2);
+    $('toggleEnabled').textContent = data.site.enabled ? 'Stop site' : 'Start site';
     if (!($('manifest').value || '').trim() && data.manifest) {
       $('manifest').value = JSON.stringify(data.manifest, null, 2);
     }
@@ -484,6 +486,19 @@
         await refresh();
       } catch {}
     }
+  };
+
+  $('toggleEnabled').onclick = async () => {
+    if (!current) return;
+    const enabled = !current.site.enabled;
+    try {
+      log(await api(`/admin/api/sites/${current.ref}/enabled`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      }));
+      await showDetail(current.ref);
+      await refresh();
+    } catch {}
   };
 
   $('rotateWrite').onclick = async () => {
