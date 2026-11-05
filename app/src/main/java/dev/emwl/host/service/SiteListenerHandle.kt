@@ -51,7 +51,7 @@ class SiteListenerHandle private constructor(
         fun start(context: Context, site: SiteRecord, service: SiteService): SiteListenerHandle {
             val host = if (site.isLanExposed) "0.0.0.0" else "127.0.0.1"
             val engine = embeddedServer(CIO, host = host, port = site.port) {
-                siteModule(context, site.id, service)
+                siteRoutes(context, service) { _ -> site.id }
             }.start(wait = false)
             return SiteListenerHandle(engine, host, site.port)
         }
@@ -60,9 +60,15 @@ class SiteListenerHandle private constructor(
 
 /**
  * Site routing reads the current record and manifest per request: auth rotation and
- * redeploys take effect without waiting for a listener restart.
+ * redeploys take effect without waiting for a listener restart. The same routes serve a
+ * dedicated listener (one fixed site) and the hub (site resolved from the Host header).
  */
-private fun Application.siteModule(context: Context, siteId: String, service: SiteService) {
+internal fun Application.siteRoutes(
+    context: Context,
+    service: SiteService,
+    includeHealth: Boolean = true,
+    siteIdOf: (ApplicationCall) -> String?,
+) {
     intercept(ApplicationCallPipeline.Monitoring) {
         val started = System.nanoTime()
         try {
@@ -73,14 +79,16 @@ private fun Application.siteModule(context: Context, siteId: String, service: Si
                 val status = call.response.status()?.value ?: HttpStatusCode.InternalServerError.value
                 val elapsedMs = ((System.nanoTime() - started) / 1_000_000).toInt()
                 runCatching {
-                    service.getSite(siteId)?.let { site ->
-                        service.database(site).recordRequest(
-                            method = call.request.httpMethod.value,
-                            path = path,
-                            status = status,
-                            ms = elapsedMs,
-                            ip = call.request.origin.remoteHost,
-                        )
+                    siteIdOf(call)?.let { id ->
+                        service.getSite(id)?.let { site ->
+                            service.database(site).recordRequest(
+                                method = call.request.httpMethod.value,
+                                path = path,
+                                status = status,
+                                ms = elapsedMs,
+                                ip = call.request.origin.remoteHost,
+                            )
+                        }
                     }
                 }
             }
@@ -88,40 +96,70 @@ private fun Application.siteModule(context: Context, siteId: String, service: Si
     }
 
     routing {
-        get("/health") {
-            val site = service.getSite(siteId)
-            if (site == null) {
-                call.respondJson(JSONObject().put("error", "site removed"), HttpStatusCode.NotFound)
-                return@get
+        if (includeHealth) {
+            get("/health") {
+                call.requireSiteId(siteIdOf) { id ->
+                    val site = service.getSite(id)
+                    if (site == null) {
+                        call.respondJson(JSONObject().put("error", "site removed"), HttpStatusCode.NotFound)
+                        return@requireSiteId
+                    }
+                    call.respondJson(
+                        JSONObject()
+                            .put("ok", true)
+                            .put("site", site.slug)
+                            .put("deployed", service.manifest(site) != null)
+                            .put("port", site.port)
+                    )
+                }
             }
-            call.respondJson(
-                JSONObject()
-                    .put("ok", true)
-                    .put("site", site.slug)
-                    .put("deployed", service.manifest(site) != null)
-                    .put("port", site.port)
-            )
         }
 
         route("/api") {
-            get("/{table}") { call.withSiteErrors { dataList(call, siteId, service) } }
-            get("/{table}/{id}") { call.withSiteErrors { dataGet(call, siteId, service) } }
-            post("/{table}") { call.withSiteErrors { dataInsert(call, siteId, service) } }
-            patch("/{table}/{id}") { call.withSiteErrors { dataUpdate(call, siteId, service) } }
-            delete("/{table}/{id}") { call.withSiteErrors { dataDelete(call, siteId, service) } }
+            get("/{table}") { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { dataList(call, id, service) } } }
+            get("/{table}/{id}") { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { dataGet(call, id, service) } } }
+            post("/{table}") { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { dataInsert(call, id, service) } } }
+            patch("/{table}/{id}") { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { dataUpdate(call, id, service) } } }
+            delete("/{table}/{id}") { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { dataDelete(call, id, service) } } }
         }
 
         route("/api/files") {
-            get { call.withSiteErrors { fileList(call, siteId, service) } }
-            post { call.withSiteErrors { fileUpload(call, siteId, service) } }
-            get("/{id}") { call.withSiteErrors { fileDownload(call, siteId, service) } }
-            delete("/{id}") { call.withSiteErrors { fileDelete(call, siteId, service) } }
+            get { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { fileList(call, id, service) } } }
+            post { call.requireSiteId(siteIdOf) { id -> call.withSiteErrors { fileUpload(call, id, service) } } }
+            get("/{id}") {
+                call.requireSiteId(siteIdOf) { siteId ->
+                    call.withSiteErrors { fileDownload(call, siteId, service) }
+                }
+            }
+            delete("/{id}") {
+                call.requireSiteId(siteIdOf) { siteId ->
+                    call.withSiteErrors { fileDelete(call, siteId, service) }
+                }
+            }
         }
 
         get("/{path...}") {
-            respondStatic(call, context, siteId, service)
+            call.requireSiteId(siteIdOf) { id -> respondStatic(call, context, id, service) }
         }
     }
+}
+
+private suspend fun ApplicationCall.requireSiteId(
+    siteIdOf: (ApplicationCall) -> String?,
+    block: suspend (String) -> Unit,
+) {
+    val id = siteIdOf(this)
+    if (id == null) {
+        respondJson(
+            JSONObject().put(
+                "error",
+                JSONObject().put("code", "UNKNOWN_HOST").put("message", "no site is mapped to this host")
+            ),
+            HttpStatusCode.NotFound
+        )
+        return
+    }
+    block(id)
 }
 
 private fun siteOf(siteId: String, service: SiteService): SiteRecord =
@@ -216,7 +254,7 @@ private fun authorize(call: ApplicationCall, site: SiteRecord, write: Boolean) {
     }
 }
 
-private suspend fun respondStatic(
+internal suspend fun respondStatic(
     call: ApplicationCall,
     context: Context,
     siteId: String,

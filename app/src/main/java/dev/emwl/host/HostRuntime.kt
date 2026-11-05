@@ -1,7 +1,10 @@
 package dev.emwl.host
 
 import android.content.Context
+import dev.emwl.host.domain.HostRouting
 import dev.emwl.host.service.SiteService
+import dev.emwl.host.service.respondStatic
+import dev.emwl.host.service.siteRoutes
 import dev.emwl.host.web.ControlTokens
 import dev.emwl.host.web.controlModule
 import io.ktor.http.ContentType
@@ -54,7 +57,6 @@ class HostRuntime(private val ctx: Context) {
         }
 
         tryStart("0.0.0.0", Ports.HUB) { hubModule() }?.let { engines += it }
-
         service.listSites().forEach { site ->
             runCatching { service.startListener(site) }
                 .onFailure {
@@ -130,18 +132,25 @@ class HostRuntime(private val ctx: Context) {
     private fun io.ktor.server.application.Application.hubModule() {
         routing {
             get("/") {
+                val site = hostSite(call)
+                if (site != null) {
+                    respondStatic(call, ctx, site.id, service)
+                    return@get
+                }
                 val sites = service.listSites()
                 val rows = sites.joinToString("") { site ->
-                    "<li><b>${site.name}</b> — <code>${site.slug}</code>:${site.port} " +
-                        "(${site.exposure})</li>"
+                    "<li><b>${site.name}</b> — <code>http://${site.slug}.${service.baseDomain}</code> " +
+                        "(port ${site.port}, ${site.exposure})</li>"
                 }
                 call.respondText(
                     """
                     <!doctype html>
-                    <html><head><meta charset="utf-8"><title>everything-mcp-web in LAN</title></head>
+                    <html><head><meta charset="utf-8"><title>PocketServe</title></head>
                     <body style="font-family:system-ui;margin:2rem">
                     <h1>Hosted sites</h1>
                     <ul>$rows</ul>
+                    <p>Requests are routed by the <code>Host</code> header, so one port can serve every
+                    name; point a reverse proxy or DNS wildcard at <code>http://&lt;name&gt;.${service.baseDomain}</code>.</p>
                     <p>Control plane: <code>http://127.0.0.1:${controlPort}</code> (loopback only)</p>
                     </body></html>
                     """.trimIndent(),
@@ -149,6 +158,19 @@ class HostRuntime(private val ctx: Context) {
                 )
             }
             get("/health") {
+                val site = hostSite(call)
+                if (site != null) {
+                    call.respondText(
+                        JSONObject()
+                            .put("ok", true)
+                            .put("site", site.slug)
+                            .put("deployed", service.manifest(site) != null)
+                            .put("port", site.port)
+                            .toString(),
+                        ContentType.Application.Json
+                    )
+                    return@get
+                }
                 call.respondText(
                     JSONObject()
                         .put("ok", true)
@@ -158,5 +180,17 @@ class HostRuntime(private val ctx: Context) {
                 )
             }
         }
+
+        // The same site routes serve the hub, with the site taken from the Host header.
+        siteRoutes(ctx, service, includeHealth = false) { call -> hostSite(call)?.id }
     }
+
+    /**
+     * The hub is a LAN entry point, so local-only sites are not resolvable through it even
+     * though the hub itself listens on all interfaces.
+     */
+    private fun hostSite(call: io.ktor.server.application.ApplicationCall): dev.emwl.host.data.SiteRecord? =
+        HostRouting.slugForHost(call.request.headers["Host"], service.baseDomain)
+            ?.let { slug -> service.repository().findBySlug(slug) }
+            ?.takeIf { it.isLanExposed }
 }
