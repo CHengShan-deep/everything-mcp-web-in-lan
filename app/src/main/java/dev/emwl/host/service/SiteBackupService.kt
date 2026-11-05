@@ -6,6 +6,7 @@ import dev.emwl.host.data.FileRecord
 import dev.emwl.host.data.SiteRecord
 import dev.emwl.host.domain.DomainException
 import dev.emwl.host.domain.Manifest
+import dev.emwl.host.domain.Vault
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -189,7 +190,67 @@ class SiteBackupService(private val context: Context, private val service: SiteS
         }
         val zipFile = File(backupDir(sourceSite), "$backupId.zip")
         if (!zipFile.isFile) throw DomainException("NOT_FOUND", "backup not found")
+        return importArchive(zipFile, sourceSite.slug, backupId, slug, name)
+    }
 
+    /**
+     * Seals one backup archive with a passphrase so it can leave the device: the file is
+     * encrypted whole, so folder and upload names are hidden too.
+     */
+    fun export(site: SiteRecord, backupId: String, passphrase: String): JSONObject {
+        if (passphrase.length < Vault.MIN_PASSPHRASE) {
+            throw DomainException("INVALID_ARGUMENT", "passphrase must be at least ${Vault.MIN_PASSPHRASE} characters")
+        }
+        if (!backupId.matches(Regex("^backup-[0-9]+$"))) {
+            throw DomainException("INVALID_ARGUMENT", "invalid backup id")
+        }
+        val zipFile = File(backupDir(site), "$backupId.zip")
+        if (!zipFile.isFile) throw DomainException("NOT_FOUND", "backup not found")
+
+        val plain = zipFile.readBytes()
+        if (plain.size > MAX_EXPORT_BYTES) {
+            throw DomainException("TOO_LARGE", "backup exceeds the ${MAX_EXPORT_BYTES / (1024 * 1024)} MB export limit")
+        }
+        val sealed = Vault.encrypt(plain, passphrase.toCharArray())
+        service.audit("backup_export", site, backupId)
+        return JSONObject()
+            .put("backup", backupId)
+            .put("name", "$backupId.vault")
+            .put("bytes", sealed.size)
+            .put("base64", android.util.Base64.encodeToString(sealed, android.util.Base64.NO_WRAP))
+    }
+
+    /** Reads a sealed archive and imports it as a brand new site. */
+    fun importEncrypted(
+        slug: String,
+        name: String,
+        container: ByteArray,
+        passphrase: String,
+        confirm: Boolean,
+    ): JSONObject {
+        if (!confirm) {
+            throw DomainException("CONFIRM_REQUIRED", "importing creates a new site; pass confirm=true")
+        }
+        if (container.size > MAX_IMPORT_BYTES) {
+            throw DomainException("TOO_LARGE", "archive exceeds the ${MAX_IMPORT_BYTES / (1024 * 1024)} MB import limit")
+        }
+        val plain = Vault.decrypt(container, passphrase.toCharArray())
+        val staged = File(context.cacheDir, "import-${System.currentTimeMillis()}.zip")
+        try {
+            staged.writeBytes(plain)
+            return importArchive(staged, null, "encrypted", slug, name)
+        } finally {
+            staged.delete()
+        }
+    }
+
+    private fun importArchive(
+        zipFile: File,
+        sourceSlug: String?,
+        label: String,
+        slug: String,
+        name: String,
+    ): JSONObject {
         val created = service.createSite(slug, name)
         val writeToken = created.getString("writeToken")
         val target = service.resolveSite(created.getJSONObject("site").getString("id"))
@@ -274,12 +335,12 @@ class SiteBackupService(private val context: Context, private val service: SiteS
             )
             service.repository().update(updated)
             service.startListener(updated)
-            service.audit("backup_restore_as", updated, "$backupId from ${sourceSite.slug}")
+            service.audit("backup_restore_as", updated, "$label from ${sourceSlug ?: "encrypted archive"}")
 
             return JSONObject()
                 .put("created", true)
-                .put("backup", backupId)
-                .put("sourceSite", sourceSite.slug)
+                .put("backup", label)
+                .put("sourceSite", sourceSlug ?: JSONObject.NULL)
                 .put("tables", org.json.JSONArray(manifest?.tables?.keys?.toList() ?: emptyList<String>()))
                 .put("files", fileCount)
                 .put("revision", baseline?.id ?: JSONObject.NULL)
@@ -381,5 +442,7 @@ class SiteBackupService(private val context: Context, private val service: SiteS
         const val MAX_ENTRIES = 10_000
         const val MAX_ENTRY_BYTES = 100L * 1024 * 1024
         const val MAX_TOTAL_BYTES = 500L * 1024 * 1024
+        const val MAX_EXPORT_BYTES = 4 * 1024 * 1024
+        const val MAX_IMPORT_BYTES = 6 * 1024 * 1024
     }
 }

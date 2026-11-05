@@ -415,6 +415,47 @@ class McpTools(
         },
 
         tool(
+            "site_backup_export",
+            "Seal one backup with a passphrase and return it as base64 so it can leave the device.",
+            schema(required = listOf("site", "backup", "passphrase")) {
+                prop("site", "string")
+                prop("backup", "string")
+                prop("passphrase", "string")
+            },
+        ) { args ->
+            val site = service.resolveSite(args.requireString("site"))
+            service.backups().export(site, args.requireString("backup"), args.requireString("passphrase"))
+        },
+
+        tool(
+            "site_backup_import",
+            "Import a sealed backup as a new site. Requires confirm=true and the right passphrase.",
+            schema(required = listOf("slug", "name", "contentBase64", "passphrase", "confirm")) {
+                prop("slug", "string")
+                prop("name", "string")
+                prop("contentBase64", "string")
+                prop("passphrase", "string")
+                prop("confirm", "boolean")
+            },
+        ) { args ->
+            val bytes = runCatching {
+                android.util.Base64.decode(
+                    args.requireString("contentBase64"),
+                    android.util.Base64.NO_WRAP
+                )
+            }.getOrElse {
+                throw DomainException("INVALID_ARGUMENT", "contentBase64 is not valid base64")
+            }
+            service.backups().importEncrypted(
+                slug = args.requireString("slug"),
+                name = args.requireString("name"),
+                container = bytes,
+                passphrase = args.requireString("passphrase"),
+                confirm = args.optBoolean("confirm", false),
+            )
+        },
+
+        tool(
             "site_revision_list",
             "List stored content revisions (newest first) and mark the one being served.",
             schema(required = listOf("site")) { prop("site", "string") },
